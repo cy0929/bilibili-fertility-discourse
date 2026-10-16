@@ -1,0 +1,84 @@
+# LLM comment sentiment analysis - config template (local OpenAI-compatible endpoint)
+# Usage: copy to sentiment_config.toml and edit as needed.
+# The endpoint can also be set via env vars: LLM_API_BASE_URL, LLM_API_KEY, LLM_MODEL.
+# A locally deployed server (vLLM / SGLang / LM Studio / Ollama) normally needs no key.
+
+[api]
+base_url = "http://localhost:8000/v1"
+api_key = ""   # empty = env var LLM_API_KEY, else placeholder "EMPTY"
+
+[model]
+name = "deepseek-ai/DeepSeek-V4-Pro"
+response_format = "json_object" # JSON mode (supported by vLLM/SGLang for DeepSeek-V4-Pro); options: json_schema, json_object, none
+temperature = 0.1
+max_tokens = 8192
+enable_thinking = false
+
+[run]
+# The comment-detail table; Comment_Content holds the comment text (see data/README.md)
+input = 'data/raw/comments_first_level.xlsx'
+# Empty output auto-generates *_sentiment.xlsx; the script prefixes a YYYYMMDDHHMMSS_ timestamp.
+output = ""
+# true = locate the newest YYYYMMDDHHMMSS_*_sentiment.xlsx and continue from unfinished rows.
+resume_from_latest = true
+sheet = ""
+comment_column = "Comment_Content"
+# Commenter names / IDs are never read or sent to the model (no user_column option).
+batch_size = 50
+max_workers = 8
+min_split_batch_size = 10
+timeout = 180
+max_retries = 6
+save_every = 1
+
+[rate_limit]
+# A local server has no provider quota; leave disabled unless you proxy a shared GPU server.
+enabled = false
+max_rpm = 500
+max_tpm = 2000000
+# Stability first: use only 50% of the quota, leaving room for tokenizer estimation
+# error, network jitter and retries.
+safety_factor = 0.50
+
+[logging]
+# INFO suits full production runs; switch to DEBUG when investigating API or JSON parsing issues.
+# This is a log-file template name; the script prefixes a YYYYMMDDHHMMSS_ timestamp.
+level = "INFO"
+file = 'logs/sentiment_analysis_llm.log'
+
+[prompts]
+# NOTE: the prompts below are intentionally kept in the original Chinese. They are the
+# exact strings sent to the model; editing them would change model output and break
+# reproducibility against the published results.
+system_prompt = '''
+你是一个严谨的中文社交媒体评论情感分析员。
+
+任务：分析用户评论表达的情感，而不是分析视频标题、作者立场或事实真伪。
+
+判定规则：
+1. 只根据评论文本判断；标题、视频主题等上下文只能用于消歧，不能替代评论本身。
+2. 情感标签只能从 positive、negative、neutral中选择。
+3. sentiment_score 使用 -1 到 1：-1 极负面，0 中性，1 极正面。
+4. comment 过短、只有表情/乱码/无法判断时，label 用 uncertain，score 接近 0。
+5. 讽刺、反问、阴阳怪气要按真实情绪判断；
+6. 必须严格输出 JSON，不要输出 Markdown，不要添加解释文字。
+7. 尽量输出紧凑 JSON，不要为了美观换行或缩进。
+'''
+
+user_prompt_template = '''
+请对下面这批评论逐条做情感分析。
+
+只输出一个紧凑 JSON 对象，格式：
+{{
+  "items": [
+    {{
+      "row_id": 2,
+      "sentiment_label": "positive|negative|neutral",
+      "sentiment_score": 0.0
+    }}
+  ]
+}}
+
+评论数据：
+{comments_json}
+'''

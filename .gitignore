@@ -1,0 +1,90 @@
+# =============================================================================
+# Data and outputs: this repository distributes no data files
+# (directory contents are ignored, placeholder files are kept so that a fresh
+#  clone is immediately usable)
+#
+# NOTE: .gitignore does not support inline comments; "#" is only a comment at
+# the start of a line. Every explanation therefore needs its own line.
+# =============================================================================
+data/*
+!data/README.md
+output/*
+!output/.gitkeep
+
+*.xlsx
+*.xls
+*.csv
+*.npz
+
+# Exception: the retrieval-keyword list is method material and is tracked
+# (embedding caches *.npz are large and rebuildable, so they stay ignored)
+!docs/search_keywords.csv
+
+# =============================================================================
+# Secrets: never commit these
+# =============================================================================
+config/bertopic_config.yaml
+config/sentiment_config.toml
+.env
+.env.*
+!.env.example
+*.key
+secrets.*
+
+# =============================================================================
+# Logs and temporary files
+# =============================================================================
+logs/
+*.log
+*.tmp
+# Office/WPS lock files
+~$*
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# =============================================================================
+# Node (in case the front-end export scripts are used)
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# =============================================================================
+# IDE / editor
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude/
+
+# =============================================================================
+# Review notes written by assistants / editors (never part of the release)
+Claude outputs/
+
+# =============================================================================
+# Manuscripts: unpublished material stays out of the repository
+# =============================================================================
+*.docx
+*.doc
+*.pptx
+manuscript/
+draft/

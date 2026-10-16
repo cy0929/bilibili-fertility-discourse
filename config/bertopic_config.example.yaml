@@ -1,0 +1,394 @@
+# =============================================================================
+# BERTopic comment topic classification - config file (API version + seed topics)
+# -----------------------------------------------------------------------------
+# Usage:
+#   python bertopic_api.py
+#   python bertopic_api.py --config config/bertopic_config.yaml
+#
+# Design of this configuration:
+#   1. Keep 12 micro topics at the base layer instead of collapsing everything into one large topic 0
+#   2. Merge them into mutually exclusive analytic macro categories via macro_topicing
+#   3. Mark ambiguous cases as noise / for manual review so they stay out of the main analysis
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# io: input / output paths  (on Windows use single quotes so backslashes are not escapes)
+#
+# WARNING: relative paths resolve against the CURRENT WORKING DIRECTORY, not against
+#     the directory of this config file. Always run the scripts from the repo root:
+#        cd <repo_root>
+#        python src/01_topic_classification/bertopic_api.py --config config/bertopic_config.yaml
+#
+# WARNING: user_dict (the domain dictionary) is SILENTLY SKIPPED when the file does not
+#     exist. No error is raised and the run continues, but segmentation differs and so
+#     does classification. After a run, check the log for the line
+#     "User dictionary: lexicons/fertility_dict.txt" to confirm the dictionary loaded.
+# -----------------------------------------------------------------------------
+io:
+  input_file: 'data/raw/comments_first_level.xlsx'   # first-level comment table (see data/README.md)
+  input_glob: ""
+  output_dir: 'output/topic_classification'
+  stopwords: 'lexicons/stopwords_bilibili.txt'
+  user_dict: 'lexicons/fertility_dict.txt'
+  irrelevant_keywords: 'lexicons/irrelevant_keywords_bilibili.txt'
+
+
+# -----------------------------------------------------------------------------
+# api: locally deployed OpenAI-compatible embedding endpoint (vLLM / SGLang / Ollama ...)
+#      env var LLM_API_BASE_URL overrides base_url; LLM_API_KEY overrides api_key
+# -----------------------------------------------------------------------------
+api:
+  base_url: "http://localhost:8000/v1"
+  model: "Qwen/Qwen3-Embedding-8B"
+  api_key: ""                         # empty = env var LLM_API_KEY, else placeholder "EMPTY" (local servers ignore it)
+  batch_size: 32
+  max_concurrency: 4
+  request_timeout: 60
+  max_retries: 5
+  max_chars_per_text: 1500
+  cache_enabled: true                 # keep enabled: cached embeddings are not billed again
+
+
+# -----------------------------------------------------------------------------
+# preprocessing: comment filtering
+# -----------------------------------------------------------------------------
+preprocessing:
+  include_sub_replies: false
+  min_likes: 0
+  sample_size: 0
+  min_char_len: 6
+  min_token_count: 3
+  drop_social_chatter: true           # drops purely social chatter; lowers noise in the topic output
+  require_research_signal: false      # research-signal filter off: keeps more raw comments in the run
+
+
+# -----------------------------------------------------------------------------
+# umap: dimensionality reduction
+# -----------------------------------------------------------------------------
+umap:
+  n_neighbors: 30                     # larger neighbourhood: fewer isolated points, keeps medium-grain structure
+  n_components: 5
+  min_dist: 0.05
+  random_state: 42
+
+
+# -----------------------------------------------------------------------------
+# hdbscan: base-layer micro-topic clustering; final analytic categories come from macro_topicing
+# -----------------------------------------------------------------------------
+hdbscan:
+  min_cluster_size: 30                # lower cluster-size floor keeps comments out of topic 0 / -1
+  min_samples: 1                      # looser core-sample threshold markedly reduces -1 noise
+  min_topic_size: 30                  # kept equal to min_cluster_size to retain a reasonable number of micro topics
+
+
+# -----------------------------------------------------------------------------
+# topic_modeling
+# -----------------------------------------------------------------------------
+topic_modeling:
+  # Keep 12 micro topics at the base layer, then merge into the analytic macro
+  # categories defined by the semantic codebook. The main analysis reads macro_topic;
+  # micro_topic is kept only for auditing borderline cases.
+  nr_topics: 12
+  run_bertopic: false                 # false = skip UMAP / HDBSCAN / BERTopic entirely and run
+                                      # embedding-based classification into the seven categories,
+                                      # plus sub-clustering inside each first-level topic
+
+  top_n_words: 12
+  min_df: 3                            # with ~58k documents, terms occurring <3 times are mostly noise
+  mmr_diversity: 0.3
+
+  # Confidence threshold. An earlier, stricter value (0.35) marked about half of all
+  # comments as noise, so the threshold was lowered to reduce post-hoc noise assignment.
+  min_topic_prob: 0.15
+
+  review_prob_gap: 0.08
+  # -------------------------------------------------------------------------
+  # Final analytic categories: merge comments into 7 mutually exclusive frames
+  # -------------------------------------------------------------------------
+  macro_topicing:
+    enabled: true
+    method: "semantic_codebook"
+    min_similarity: 0.28              # raw similarity of the top-1 category below this = ambiguous
+    min_margin: 0.025                 # gap between top-1 and top-2 below this = ambiguous
+    priority_boost: 0.030             # mild weighting of strong domain signals, used here to divert
+                                      # economic / intergenerational / gender signals out of category 1
+    max_priority_boost: 0.090
+    first_topic_rebalance:
+      enabled: true
+      source_topic_name: "婚恋关系与婚姻进入"
+      max_extra_boost: 0.180          # when category 1 leads only slightly and another category has a
+                                      # strong signal, allow the case to be diverted
+      min_target_similarity: 0.28
+      target_topic_names:
+        - "生育意愿与人生选择"
+        - "婚育经济成本与生活机会"
+        - "性别权力与身体自主"
+        - "原生家庭与代际养育伦理"
+    unassigned_name: "边界不清/其他"
+    labels:
+      - name: "婚恋关系与婚姻进入"
+        definition: "围绕恋爱、择偶、相亲、婚礼仪式、伴侣/夫妻关系、婚姻稳定性和离婚风险的讨论；不再承载彩礼房车等资源交换、父母催婚控制或性别权力批判。"
+        include:
+          - "恋爱、喜欢、择偶、相亲、对象、伴侣、夫妻关系等亲密关系互动与进入议题"
+          - "婚礼、新婚、结婚仪式、婚后关系、离婚风险、婚姻稳定性等关系本身的讨论"
+          - "讨论是否进入婚姻制度，但核心是伴侣关系、情感安全或婚姻契约本身"
+        exclude:
+          - "重点是不婚、不结婚、恐婚、自由生活、丁克或生不生选择时归入生育意愿与人生选择"
+          - "重点是彩礼、嫁妆、三金、婚房、房车、收入、教育费、养育费等资源负担时归入婚育经济成本与生活机会"
+          - "重点是父母催婚、亲戚逼婚、家庭控制或道德绑架时归入原生家庭与代际养育伦理"
+          - "重点是父权、女权、性别不平等、婚内权力或女性身体自主时归入性别权力与身体自主"
+        examples:
+          - "两个人都愿意承担责任的话，恋爱和结婚才有意义"
+          - "婚姻关系里最重要的是信任和安全感，不只是办一场婚礼"
+        priority_keywords: ["婚礼", "新婚", "婚姻", "相亲", "婚配", "适婚", "择偶", "伴侣", "恋爱", "离婚", "夫妻", "对象", "谈恋爱", "感情"]
+      - name: "生育意愿与人生选择"
+        definition: "围绕是否生育、是否进入婚育制度、不婚不育、丁克、恐婚恐育、催生抵抗，以及把婚育视为个人生活方式和人生选择的讨论。"
+        include:
+          - "不生、不想生、丁克、不婚不育、恐育、要不要生、是否要孩子等生育意愿表达"
+          - "不婚、不结婚、恐婚、拒绝进入婚姻制度、把不结婚不生育作为生活方式选择"
+          - "催生压力、反催生、个人自由、生活方式、自我实现和人生规划"
+          - "把结婚与生育拆开讨论，强调生育应由个人自主决定"
+        exclude:
+          - "重点是怀孕、分娩、流产、避孕、产检或医疗风险时归入生育身体风险与医疗经验"
+          - "重点是产后照护、哺乳、带娃劳动时归入母职照护与产后处境"
+          - "重点是经济负担导致不生时归入婚育经济成本与生活机会"
+          - "重点是父权、夫权或女性身体自主时归入性别权力与身体自主"
+        examples:
+          - "我可以恋爱但不想结婚生孩子"
+          - "生不生是个人选择，不应该被亲戚催着完成任务"
+        priority_keywords: ["不生", "不想生", "丁克", "不婚不育", "不婚", "不结婚", "不想结婚", "恐婚", "单身", "一辈子单身", "不育", "恐育", "催生", "反催生", "要不要生", "是否生育", "人生选择", "个人选择", "自由生活"]
+      - name: "生育身体风险与医疗经验"
+        definition: "围绕怀孕、分娩、流产、避孕、产检、助孕及医疗过程中的身体风险、疼痛、技术干预和伦理风险。"
+        include:
+          - "顺产、剖腹产、无痛分娩、宫缩、撕裂、侧切、漏尿、盆底肌、妊娠纹等身体经验"
+          - "医院、医生、产检、人流、清宫、避孕、流产、试管、代孕等医疗或技术场景"
+          - "对生育身体代价、医疗知情、生产风险、技术伦理的评价"
+        exclude:
+          - "仅讨论带娃、母乳、月子和照护分工时归入母职照护与产后处境"
+          - "仅讨论是否要生、恐育或人生选择时归入生育意愿与人生选择"
+        examples:
+          - "看到顺产撕裂和侧切真的害怕生孩子"
+          - "女性生产前应该被充分告知分娩风险"
+        priority_keywords: ["顺产", "剖腹产", "剖宫产", "分娩", "无痛", "宫缩", "撕裂", "侧切", "漏尿", "盆底肌", "妊娠纹", "产检", "人流", "清宫", "流产", "避孕", "试管", "代孕", "医院", "医生"]
+      - name: "母职照护与产后处境"
+        definition: "围绕产后恢复、哺乳喂养、带娃劳动、母职压力、情绪消耗和家庭照护分工。"
+        include:
+          - "产后抑郁、坐月子、母乳、奶粉、哺乳、产后恢复"
+          - "带娃、育儿分工、丧偶式育儿、妈妈承担主要照护"
+          - "成为母亲后的身体、情绪、时间和职业处境"
+        exclude:
+          - "主要讲分娩疼痛、手术、流产、避孕等医疗风险时归入生育身体风险与医疗经验"
+          - "主要讲父母子女创伤或原生家庭时归入原生家庭与代际养育伦理"
+          - "主要讲彩礼、房贷、教育费等资源压力时归入婚育经济成本与生活机会"
+        examples:
+          - "生完以后坐月子、喂奶和带娃都压在妈妈身上"
+          - "产后抑郁不是矫情，是照护支持太少"
+        priority_keywords: ["产后", "产后抑郁", "产后恢复", "坐月子", "月子", "母乳", "奶粉", "哺乳", "带娃", "产妇", "妈妈", "母职", "照护", "丧偶式育儿", "育儿分工"]
+      - name: "婚育经济成本与生活机会"
+        definition: "围绕结婚和生育带来的经济支出、婚姻资源交换、住房教育压力、工作收入约束、阶层流动和个人机会成本。"
+        include:
+          - "彩礼、嫁妆、三金、婚房、婚车、婚宴开销、男方女方出资等婚姻资源交换与经济门槛"
+          - "买房、买车、房贷、教育成本、托育成本、奶粉尿不湿、养育成本等支出压力"
+          - "收入、工资、就业、加班、失业、晋升受限、机会成本、生活质量下降"
+          - "把不婚不育解释为经济理性、资源不足或生活质量选择"
+        exclude:
+          - "仅讨论婚礼仪式、相亲或婚姻关系本身时归入婚恋关系与婚姻进入；父母催婚/逼婚归入原生家庭与代际养育伦理"
+          - "仅讨论是否生育的价值选择而非经济约束时归入生育意愿与人生选择"
+          - "仅讨论父母偏心、原生家庭或兄弟姐妹关系时归入原生家庭与代际养育伦理"
+        examples:
+          - "不是不想生，是房贷、教育和工作压力不允许"
+          - "彩礼、婚房和养孩子的成本让很多人不敢进入婚育"
+        priority_keywords: ["彩礼", "嫁妆", "三金", "婚房", "婚车", "婚宴", "随礼", "礼金", "喜酒", "男方出", "女方出", "买房", "买车", "房价", "房贷", "学区房", "教育成本", "育儿成本", "养育成本", "托育", "成本", "压力", "工资", "收入", "就业", "失业", "加班", "机会成本", "生活质量"]
+      - name: "性别权力与身体自主"
+        definition: "围绕父权结构、性别不平等、婚育关系中的权力分配、身体规训、女性处境、男性责任、性别权利和生育自主。"
+        include:
+          - "重男轻女、儿子偏好、冠姓权、姓氏、女方/男方责任不对等"
+          - "婚姻、恋爱或生育中的性别权力不平等、婚内安全、家暴、出轨背叛、女性风险承担"
+          - "女性身体自主、服美役、化妆规训、女权争议、性别刻板印象"
+          - "围绕生育责任、风险承担和权利分配的性别化讨论"
+        exclude:
+          - "主要讲父母与孩子关系但没有性别权力结构时归入原生家庭与代际养育伦理"
+          - "主要讲婚礼、相亲、不婚选择但没有性别权力判断时归入婚姻制度或生育意愿相关主题"
+          - "主要讲分娩医疗风险但不讨论权力和自主时归入生育身体风险与医疗经验"
+        examples:
+          - "重男轻女不是家庭小事，是资源和权力分配"
+          - "女性承担怀孕风险，却常常没有生育决定权"
+        priority_keywords: ["重男轻女", "重女轻男", "女权", "女性", "男性", "女生", "女人", "男方", "女方", "男女", "性别", "父权", "夫权", "冠姓权", "姓氏", "身体自主", "服美役", "化妆", "平权", "家暴", "出轨", "背叛", "婚内", "妻子", "丈夫"]
+      - name: "原生家庭与代际养育伦理"
+        definition: "围绕父母子女、原生家庭、亲子创伤、父母控制、催婚催生压力、兄弟姐妹、偏心、养育伦理、代际责任，以及是否复制上一代养育方式。"
+        include:
+          - "父母、孩子、小孩、儿子、女儿、弟弟、家长、原生家庭、亲子关系"
+          - "父母或亲戚对相亲、结婚、生育的催促、逼迫、控制和道德绑架"
+          - "童年创伤、父母控制、偏心、兄弟姐妹资源分配、赡养、家庭责任"
+          - "讨论是否要生孩子，是因为担心复制父母的养育方式或伤害下一代"
+        exclude:
+          - "只是普通相亲、恋爱或婚礼流程且没有家庭控制时归入婚恋关系与婚姻进入"
+          - "重点是个体不婚不育、自由生活或生不生价值选择时归入生育意愿与人生选择"
+          - "涉及重男轻女或性别资源不平等时优先归入性别权力与身体自主"
+          - "涉及带娃劳动和母亲照护负担时优先归入母职照护与产后处境"
+        examples:
+          - "原生家庭让我不敢生孩子，也不想复制父母的养育方式"
+          - "父母催婚催生让我觉得自己只是被安排完成家庭任务"
+        priority_keywords: ["原生家庭", "亲子", "童年", "童年创伤", "父母控制", "催婚", "逼婚", "催生", "家里催", "我妈催", "亲戚催", "道德绑架", "偏心", "控制", "兄弟姐妹", "弟弟", "重男轻女", "赡养", "婆媳", "外婆", "家族", "养育方式", "复制父母", "亲子创伤"]
+
+  sub_topicing:
+    enabled: true
+    method: "intra_primary_kmeans"
+    target_docs_per_subtopic: 900      # approximate comments per second-level topic; smaller -> more sub-topics
+    min_subtopics: 2                   # minimum sub-topics per first-level topic; drops to 1 when too few samples
+    max_subtopics: 5                   # maximum sub-topics per first-level topic, to avoid over-fragmentation
+    min_cluster_size: 80               # sub-clusters below this size are merged back into a nearby large cluster
+    top_n_words: 10
+    representative_docs: 3
+    min_keyword_len: 2
+    random_state: 42
+
+  # =========================================================================
+  # Seed topic list: six predefined marriage-and-childbearing research topics
+  # -----------------------------------------------------------------------
+  # Each inner list holds the seed words of one topic. BERTopic up-weights these
+  # words during c-TF-IDF so the resulting topics are more likely to align with
+  # the seeds.
+  #
+  # Important:
+  #   - This is semi-supervision, not a hard binding. The final analytic categories
+  #     are decided by macro_topicing. seed_topic_list only nudges the base-layer
+  #     micro topics toward the research frame; it does not equal the final category.
+  #     The seven final categories are defined explicitly by macro_topicing above.
+  #   - After a run, compare each topic's keywords in the topic-overview CSV against
+  #     the seeds below to tell which seed a topic corresponds to.
+  #   - To change or add topics, edit the lists below and re-run. The embedding cache
+  #     is reused, so only clustering repeats and the run stays fast.
+  # =========================================================================
+  seed_topic_list:
+
+    # (1) Physical suffering of childbirth
+    - ["生育", "分娩", "产痛", "宫缩", "痛经", "剖腹产", "顺产", "难产",
+       "会阴", "会阴撕裂", "撕裂", "侧切", "漏尿", "盆底肌", "子宫脱垂",
+       "妊娠纹"]
+
+    # (2) Postpartum recovery and mental health
+    - ["产后", "产后抑郁", "产后恢复", "坐月子", "母乳", "奶粉", "带娃",
+       "产妇", "孕激素", "孕期", "孕晚期"]
+
+    # (3) Economic cost of marriage and childbearing
+    - ["彩礼", "嫁妆", "买房", "买车", "教育", "成本", "压力", "育儿",
+       "养育", "奶粉"]
+
+    # (4) Attitudes to marriage (marrying / staying single / pressure to marry)
+    - ["结婚", "婚礼", "婚配", "催婚", "催生", "婚姻", "不生", "代孕"]
+
+    # (5) Gender inequality
+    - ["重男轻女", "重女轻男", "男性", "女性", "服美役", "化妆", "自由",
+       "前列腺", "男", "女"]
+
+    # (6) Child-rearing and parent-child relations
+    - ["孩子", "小孩", "生孩子", "儿子", "女儿", "弟弟"]
+
+
+# -----------------------------------------------------------------------------
+# auto_select_k: automatic K selection (disabled when seed topics are used, since nr_topics is fixed)
+# -----------------------------------------------------------------------------
+auto_select_k:
+  enabled: false
+  k_min: 5
+  k_max: 12
+  k_step: 1
+  target_topic_count: 6
+  topic_count_penalty: 0.12
+
+
+# -----------------------------------------------------------------------------
+# output
+# -----------------------------------------------------------------------------
+output:
+  save_model: false
+
+
+# =============================================================================
+# Lexicon constants (domain word lists); Chinese terms are matched as-is
+# =============================================================================
+forced_irrelevant_keywords:
+  - 高中生
+  - 校服
+  - 考研
+
+social_chatter_tokens:
+  - 姐姐
+  - 阿姨
+  - 本人
+  - 喜欢
+  - 可爱
+  - 照片
+  - 温柔
+  - 这位
+  - 呜呜
+  - 妹妹
+  - 哥哥
+  - 老师
+  - 美女
+  - 帅哥
+
+research_signal_tokens:
+  - 重男轻女
+  - 重女轻男
+  - 女性
+  - 男性
+  - 男
+  - 女
+  - 弟弟
+  - 儿子
+  - 女儿
+  - 生育
+  - 分娩
+  - 产妇
+  - 产痛
+  - 产后
+  - 产后抑郁
+  - 产后恢复
+  - 痛经
+  - 剖腹产
+  - 顺产
+  - 难产
+  - 会阴
+  - 会阴撕裂
+  - 撕裂
+  - 侧切
+  - 漏尿
+  - 盆底肌
+  - 子宫脱垂
+  - 妊娠纹
+  - 前列腺
+  - 宫缩
+  - 孕激素
+  - 孕期
+  - 孕晚期
+  - 坐月子
+  - 母乳
+  - 奶粉
+  - 带娃
+  - 育儿
+  - 养育
+  - 彩礼
+  - 嫁妆
+  - 买房
+  - 买车
+  - 教育
+  - 成本
+  - 压力
+  - 结婚
+  - 婚礼
+  - 婚配
+  - 催婚
+  - 催生
+  - 婚姻
+  - 孩子
+  - 小孩
+  - 生孩子
+  - 不生
+  - 代孕
+  - 服美役
+  - 化妆
+  - 自由
+

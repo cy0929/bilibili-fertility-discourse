@@ -1,0 +1,27 @@
+# =============================================================================
+# Bilibili marriage-and-childbearing discourse analysis — Python dependencies
+# Requires Python 3.11+ (sentiment_analysis_llm.py uses stdlib tomllib)
+#
+# Install: pip install -r requirements.txt
+# =============================================================================
+
+# --- Core dependencies (required by every script) ----------------------------
+pandas>=2.0
+numpy>=1.24
+openpyxl>=3.1          # read/write xlsx, including styling and multi-sheet workbooks
+PyYAML>=6.0            # loads bertopic_config.yaml
+jieba>=0.42.1          # Chinese word segmentation (paired with lexicons/fertility_dict.txt)
+scikit-learn>=1.3      # MiniBatchKMeans (second-level clustering within a first-level topic), c-TF-IDF
+scipy>=1.10            # chi-square tests, one-way ANOVA (f_oneway)
+openai>=1.30           # client for the local OpenAI-compatible embedding endpoint
+tqdm>=4.66             # progress bars (scripts degrade gracefully when absent)
+
+# --- Optional dependencies (only needed when topic_modeling.run_bertopic: true) ----
+# The study ran with run_bertopic: false (the semantic codebook decides the
+# first-level topic directly), so these are not required by default.
+# Uncomment to reproduce the unsupervised-clustering comparison:
+#
+# bertopic>=0.16
+# umap-learn>=0.5.5
+# hdbscan>=0.8.33
+# sentence-transformers>=2.7

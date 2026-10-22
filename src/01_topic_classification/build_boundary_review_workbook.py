@@ -1,16 +1,16 @@
 """Build the boundary-sample review workbook (stage 2 of topic classification).
 
-Input : the full output of bertopic_api.py (评论主题分类结果_<run_tag>.xlsx) and its
+Input : the full output of bertopic_api.py (the comment results workbook) and its
         first/second-level topic table.
 Output: comments_boundary_review_<run_tag>_<timestamp>.xlsx with
-        - 评论分类_更新          : ONLY comments that passed the codebook thresholds
+        - Comments_updated          : ONLY comments that passed the codebook thresholds
                                    (min_similarity / min_margin) — the high-confidence sample.
-        - 边界样本_待人工复核    : every boundary / noise comment with nearest-centroid
+        - Boundary_manual_review    : every boundary / noise comment with nearest-centroid
                                    candidate topics, a rule-based suggestion, and EMPTY
-                                   人工复核_* columns for the human reviewer.
+                                   manual_* columns for the human reviewer.
 Boundary comments are never assigned automatically. After the reviewer fills in
-人工复核_处理 (纳入/排除) and 人工复核_一级主题编号, run apply_manual_review.py to merge
-the accepted comments into the final 评论分类_更新 used by src/04_cross_analysis.
+manual_decision (include/exclude) and manual_primary_topic_no, run apply_manual_review.py to merge
+the accepted comments into the final Comments_updated used by src/04_cross_analysis.
 """
 import argparse
 import hashlib
@@ -22,9 +22,131 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+
+
+# Presentation names for this script only; source values and research rules are unchanged.
+FIELD_NAMES = {
+    "说明": "description",
+    "项目": "item",
+    "评论数": "comment_count",
+    "一级主题编号": "primary_topic_number",
+    "一级主题名称": "primary_topic_title",
+    "二级主题编号": "secondary_topic_number",
+    "规范二级主题名称": "canonical_secondary_topic_name",
+    "原始二级主题名称": "original_secondary_topic_name",
+    "主题定义": "topic_definition",
+    "纳入标准": "inclusion_criteria",
+    "排除与边界": "exclusions_and_boundaries",
+    "关键词": "keywords",
+    "代表评论": "representative_comments",
+    "自动关键词": "automatic_keywords",
+    "原代表评论": "original_representative_comments",
+    "完全不相关标记": "unrelated_flag",
+    "边界细分类": "boundary_subtype",
+    "边界细分理由": "boundary_reason",
+    "规则命中": "rule_matches",
+    "规则建议处理": "suggested_action",
+    "人工复核_处理": "manual_decision",
+    "人工复核_一级主题编号": "manual_primary_topic_no",
+    "人工复核_二级主题编号": "manual_secondary_topic_no",
+    "复核人": "reviewer",
+    "复核备注": "review_notes",
+    "分类来源": "classification_source",
+    "原始is_noise": "original_is_noise",
+    "原始noise_reason": "original_noise_reason",
+    "高置信评论数": "high_confidence_count",
+    "待复核_候选为本主题数": "pending_candidate_count",
+    "占高置信样本比例": "high_confidence_sample_share",
+    "占本一级主题比例": "within_primary_topic_share",
+    "候选一级主题编号_1": "candidate_primary_no_1",
+    "候选一级主题_1": "candidate_primary_name_1",
+    "候选一级相似度_1": "candidate_primary_similarity_1",
+    "候选一级主题编号_2": "candidate_primary_no_2",
+    "候选一级主题_2": "candidate_primary_name_2",
+    "候选一级相似度_2": "candidate_primary_similarity_2",
+    "候选一级相似度差": "candidate_primary_margin",
+    "候选二级主题编号_1": "candidate_secondary_no_1",
+    "候选二级主题_1": "candidate_secondary_name_1",
+    "候选二级相似度_1": "candidate_secondary_similarity_1",
+    "候选二级主题编号_2": "candidate_secondary_no_2",
+    "候选二级主题_2": "candidate_secondary_name_2",
+    "候选二级相似度差": "candidate_secondary_margin",
+    "规则_完全不相关标记": "rule_unrelated_flag",
+    "判定规则": "decision_rule",
+    "平均二级中心相似度": "mean_secondary_centroid_similarity",
+    "平均一级相似度": "mean_primary_similarity",
+    "平均一级中心相似度": "mean_primary_centroid_similarity",
+    "平均一级边界差距": "mean_primary_boundary_margin"
+}
+
+SHEET_NAMES = {
+    "说明": "Notes",
+    "边界噪声处理汇总": "Boundary_summary",
+    "一级主题概览_高置信": "Primary_high_confidence",
+    "二级主题分析": "Secondary_analysis",
+    "二级主题分类本": "Secondary_codebook",
+    "评论分类_更新": "Comments_updated",
+    "边界样本_待人工复核": "Boundary_manual_review",
+    "边界判定规则": "Boundary_rules"
+}
+
+def english_name(name):
+    return FIELD_NAMES.get(name, name)
+
+
+def english_sheet(name):
+    return SHEET_NAMES.get(name, name)
+
+
+def resolve_sheet(names, requested):
+    """Prefer the requested historical name; also accept the English export name."""
+    return requested if requested in names else english_sheet(requested)
+
+
+def _rename_checked(frame, mapping):
+    columns = [mapping.get(c, c) for c in frame.columns]
+    if len(set(columns)) != len(columns):
+        raise ValueError("Ambiguous table schema: column aliases would produce duplicate names")
+    result = frame.copy()
+    result.columns = columns
+    result.index.names = [mapping.get(n, n) for n in result.index.names]
+    return result
+
+
+def export_frame(frame):
+    """Return an English-header copy without changing any values or row order."""
+    if isinstance(frame, pd.Series):
+        result = frame.copy()
+        result.name = english_name(result.name)
+        result.index.names = [english_name(n) for n in result.index.names]
+        return result
+    return _rename_checked(frame, FIELD_NAMES)
+
+
+def read_excel_compatible(path, *args, **kwargs):
+    """Read either export schema into the unchanged historical internal schema.
+
+    All pipeline calls use a single sheet. Keyword dtype keys are adapted to the
+    actual sheet headers before parsing so string identifiers remain strings.
+    """
+    with pd.ExcelFile(path) as book:
+        requested = kwargs.pop("sheet_name", args[0] if args else 0)
+        rest = args[1:] if args else ()
+        actual = resolve_sheet(book.sheet_names, requested)
+        if isinstance(kwargs.get("dtype"), dict):
+            headers = pd.read_excel(book, sheet_name=actual, nrows=0).columns
+            kwargs["dtype"] = {
+                k if k in headers else english_name(k): v
+                for k, v in kwargs["dtype"].items()
+            }
+        frame = pd.read_excel(book, *rest, sheet_name=actual, **kwargs)
+    return _rename_checked(frame, {v: k for k, v in FIELD_NAMES.items()})
+
+
 
 
 MODEL = "Qwen/Qwen3-Embedding-8B"
@@ -197,7 +319,7 @@ def style_workbook(path: Path) -> None:
                 value = "" if c.value is None else str(c.value)
                 max_len = max(max_len, min(len(value), 90))
             width = min(max(max_len + 2, 10), 44)
-            if any(k in header for k in ["评论文本", "代表评论", "纳入", "排除", "定义", "说明", "理由"]):
+            if any(k in header for k in ["text", "comments", "inclusion", "exclusions", "definition", "description", "reason"]):
                 width = 52
             ws.column_dimensions[get_column_letter(idx)].width = width
 
@@ -205,7 +327,7 @@ def style_workbook(path: Path) -> None:
             for c in row:
                 c.alignment = Alignment(vertical="top", wrap_text=True)
 
-        if ws.title in {"说明", "边界判定规则"}:
+        if ws.title in {english_sheet("说明"), english_sheet("边界判定规则")}:
             ws.column_dimensions["A"].width = 30
             ws.column_dimensions["B"].width = 90
             for c in ws["A"][1:]:
@@ -221,14 +343,14 @@ def _model_glob_part() -> str:
 
 
 def latest_run_tag(output_dir: Path) -> str:
-    """Find the latest `评论主题分类结果` file and return its run_tag (model name + timestamp)."""
+    """Find the latest comment results file and return its run_tag (model name + timestamp)."""
     files = [
         p for p in output_dir.glob(f"评论主题分类结果_{_model_glob_part()}.xlsx")
         if "主分析" not in p.name
     ]
     if not files:
         raise FileNotFoundError(
-            f"在 {output_dir} 下未找到 评论主题分类结果_{_model_glob_part()}.xlsx；"
+            f"In {output_dir} no matching comment results found: 评论主题分类结果_{_model_glob_part()}.xlsx；"
             f"请先运行 bertopic_api.py，或用 --comments-file 显式指定。"
         )
     latest = max(files, key=lambda p: p.stat().st_mtime)
@@ -236,7 +358,7 @@ def latest_run_tag(output_dir: Path) -> str:
 
 
 def _resolve_subtopic_for(output_dir: Path, comments_path: Path) -> Path:
-    """Derive the first-level/second-level topic table of the same run from `评论主题分类结果_<run_tag>.xlsx`."""
+    """Derive the first-level/second-level topic table of the same run from the comment results workbook for the same run."""
     run_tag = comments_path.stem.replace("评论主题分类结果_", "", 1)
     candidate = comments_path.parent / f"一级二级主题表_{run_tag}.xlsx"
     if candidate.is_file():
@@ -249,33 +371,33 @@ def _resolve_subtopic_for(output_dir: Path, comments_path: Path) -> Path:
     if matches:
         return matches[0]
     raise FileNotFoundError(
-        f"未找到与 {comments_path.name} 同轮次的一级二级主题表；请用 --subtopic-file 显式指定。"
+        f"No topic hierarchy for the same run as {comments_path.name}; specify --subtopic-file."
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="边界/噪声样本复核工作簿：为编码本未达标的边界样本生成候选主题与规则建议，"
-                    "输出「评论分类_更新」(仅高置信样本) 与「边界样本_待人工复核」两张表；"
-                    "边界样本不自动归类，人工复核后用 apply_manual_review.py 合并"
+        description="Build candidate topics and rule suggestions for boundary/noise comments. "
+                    "Comments_updated contains high-confidence comments only; Boundary_manual_review "
+                    "requires human decisions. Merge accepted comments with apply_manual_review.py."
     )
     parser.add_argument(
         "--input-dir",
         type=Path,
         default=Path(os.environ.get("BFD_TOPIC_OUTPUT_DIR", "output/topic_classification")),
-        help="BERTopic 输出目录（环境变量 BFD_TOPIC_OUTPUT_DIR）",
+        help='BERTopic output directory (environment variable BFD_TOPIC_OUTPUT_DIR)',
     )
-    parser.add_argument("--comments-file", type=Path, default=None, help="评论主题分类结果 xlsx，默认取目录下最新一轮")
-    parser.add_argument("--subtopic-file", type=Path, default=None, help="一级二级主题表 xlsx，默认与 comments-file 同轮次")
-    parser.add_argument("--cache-file", type=Path, default=None, help=f"嵌入缓存 npz，默认 <input-dir>/{EMBEDDING_CACHE_NAME}")
-    parser.add_argument("--out-file", type=Path, default=None, help="输出工作簿路径，默认自动生成带时间戳文件名")
+    parser.add_argument("--comments-file", type=Path, default=None, help='Comment topic results workbook; defaults to the latest run in the directory')
+    parser.add_argument("--subtopic-file", type=Path, default=None, help='Topic hierarchy workbook; defaults to the same run as comments-file')
+    parser.add_argument("--cache-file", type=Path, default=None, help=f"Embedding cache NPZ; default: <input-dir>/{EMBEDDING_CACHE_NAME}")
+    parser.add_argument("--out-file", type=Path, default=None, help='Output workbook path; defaults to a timestamped filename')
     args = parser.parse_args()
 
     project_dir = args.input_dir
     output_dir = project_dir
     if not output_dir.is_dir():
         raise NotADirectoryError(
-            f"输入目录不存在：{output_dir}\n请先运行 bertopic_api.py 产出主题分类结果，或用 --input-dir 指定。"
+            f"Input directory does not exist: {output_dir}\nRun bertopic_api.py first or specify --input-dir."
         )
 
     if args.comments_file:
@@ -289,12 +411,12 @@ def main() -> None:
     run_tag = comments_path.stem.replace("评论主题分类结果_", "", 1)
     cache_path = args.cache_file or (output_dir / EMBEDDING_CACHE_NAME)
 
-    print(f"[in ] 主题分类结果 : {comments_path}")
-    print(f"[in ] 一级二级主题表: {subtopic_path}")
-    print(f"[in ] 嵌入缓存     : {cache_path}")
+    print(f"[in ] Comment topic results: {comments_path}")
+    print(f"[in ] Topic hierarchy: {subtopic_path}")
+    print(f"[in ] Embedding cache: {cache_path}")
 
-    comments = pd.read_excel(comments_path)
-    subtopic_summary = pd.read_excel(subtopic_path)
+    comments = read_excel_compatible(comments_path)
+    subtopic_summary = read_excel_compatible(subtopic_path)
     comments["doc_id"] = comments["doc_id"].astype(int)
     comments["secondary_topic_no"] = comments["secondary_topic_no"].apply(normalize_secondary_no)
     subtopic_summary["二级主题编号"] = subtopic_summary["二级主题编号"].apply(normalize_secondary_no)
@@ -303,7 +425,7 @@ def main() -> None:
     cache = np.load(cache_path, allow_pickle=False, mmap_mode="r")
     missing = [h for h in hashes if h not in cache.files]
     if missing:
-        raise RuntimeError(f"embedding 缓存缺失 {len(missing)} 条，示例：{missing[:5]}")
+        raise RuntimeError(f"Embedding cache is missing {len(missing)} entries; examples: {missing[:5]}")
     vectors = normalize_vectors(np.vstack([cache[h] for h in hashes]).astype(np.float32))
 
     original_formal = (
@@ -387,7 +509,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Boundary samples are NOT assigned automatically. The nearest-centroid
     # candidates and the rule-based suggestion are kept as *hints* for a human
-    # reviewer; the final decision is entered in the 人工复核_* columns and merged
+    # reviewer; the final decision is entered in the manual_* columns and merged
     # back by src/01_topic_classification/apply_manual_review.py.
     # ------------------------------------------------------------------
     boundary["规则建议处理"] = np.where(
@@ -491,13 +613,13 @@ def main() -> None:
     suggested_review = int(len(boundary) - suggested_exclude)
 
     notes = pd.DataFrame([
-        ["处理对象", f"最新 {run_tag} 全量结果中的边界/噪声样本：{len(boundary)} 条。"],
-        ["高置信样本", f"评论分类_更新 sheet 仅含编码本分类达标的 {int(original_formal.sum())} 条；边界样本一律不自动归类。"],
-        ["人工复核", f"边界样本_待人工复核 sheet 共 {len(boundary)} 条，其中规则建议排除 {suggested_exclude} 条、建议按候选主题复核 {suggested_review} 条。"
-                    "复核人填写 人工复核_处理（纳入/排除）、人工复核_一级主题编号（1–7）、可选 人工复核_二级主题编号。"],
-        ["候选信息", "候选一级/二级主题及相似度来自与高置信样本主题中心的余弦相似度，仅供参考，不构成最终判定。"],
-        ["合并", "复核完成后运行 src/01_topic_classification/apply_manual_review.py，将纳入的样本合并进最终的 评论分类_更新。"],
-        ["BERTopic", "本文件不重新运行 BERTopic；二级主题严格从属于当前 7 个一级主题。"],
+        ["Review scope", f"Boundary/noise comments from the complete results of run {run_tag}: {len(boundary)}."],
+        ["High-confidence sample", f"Comments_updated contains only the {int(original_formal.sum())} comments meeting the codebook thresholds. Boundary comments are never assigned automatically."],
+        ["Human review", f"Boundary_manual_review contains {len(boundary)} comments: {suggested_exclude} suggested exclusions and {suggested_review} for candidate-topic review. "
+                    "Complete manual_decision (include/exclude), manual_primary_topic_no (1-7), and optionally manual_secondary_topic_no. Historical Chinese decision values are also accepted."],
+        ["Candidate information", "Candidate primary/secondary topics use cosine similarity to high-confidence topic centroids. They are suggestions, not final decisions."],
+        ["Merge", "After review, run src/01_topic_classification/apply_manual_review.py to merge accepted comments into the final Comments_updated sheet."],
+        ["BERTopic", "This workbook does not rerun BERTopic. Secondary topics remain nested within the existing seven primary topics."],
     ], columns=["项目", "说明"])
 
     boundary_rules = pd.DataFrame([
@@ -517,14 +639,14 @@ def main() -> None:
     out_path = args.out_file or output_dir / f"comments_boundary_review_{run_tag}_{timestamp}.xlsx"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        notes.to_excel(writer, sheet_name="说明", index=False)
-        boundary["边界细分类"].value_counts().rename_axis("边界细分类").reset_index(name="评论数").to_excel(writer, sheet_name="边界噪声处理汇总", index=False)
-        primary_summary.to_excel(writer, sheet_name="一级主题概览_高置信", index=False)
-        sec_summary.to_excel(writer, sheet_name="二级主题分析", index=False)
-        codebook.to_excel(writer, sheet_name="二级主题分类本", index=False)
-        updated.to_excel(writer, sheet_name="评论分类_更新", index=False)
-        review_sheet.to_excel(writer, sheet_name="边界样本_待人工复核", index=False)
-        boundary_rules.to_excel(writer, sheet_name="边界判定规则", index=False)
+        export_frame(notes).to_excel(writer, sheet_name=english_sheet("说明"), index=False)
+        export_frame(boundary["边界细分类"].value_counts().rename_axis("边界细分类").reset_index(name="评论数")).to_excel(writer, sheet_name=english_sheet("边界噪声处理汇总"), index=False)
+        export_frame(primary_summary).to_excel(writer, sheet_name=english_sheet("一级主题概览_高置信"), index=False)
+        export_frame(sec_summary).to_excel(writer, sheet_name=english_sheet("二级主题分析"), index=False)
+        export_frame(codebook).to_excel(writer, sheet_name=english_sheet("二级主题分类本"), index=False)
+        export_frame(updated).to_excel(writer, sheet_name=english_sheet("评论分类_更新"), index=False)
+        export_frame(review_sheet).to_excel(writer, sheet_name=english_sheet("边界样本_待人工复核"), index=False)
+        export_frame(boundary_rules).to_excel(writer, sheet_name=english_sheet("边界判定规则"), index=False)
 
     style_workbook(out_path)
 
@@ -537,8 +659,8 @@ def main() -> None:
         "rule_suggested_review": suggested_review,
         "secondary_topics": int(len(codebook)),
     })
-    print(primary_summary[["primary_topic_name", "高置信评论数", "待复核_候选为本主题数"]].to_string(index=False))
-    print("下一步：在 边界样本_待人工复核 sheet 填写人工复核列，然后运行 apply_manual_review.py 合并。")
+    print(export_frame(primary_summary[["primary_topic_name", "高置信评论数", "待复核_候选为本主题数"]]).to_string(index=False))
+    print('Next: complete the manual review columns in Boundary_manual_review, then run apply_manual_review.py.')
 
 
 if __name__ == "__main__":

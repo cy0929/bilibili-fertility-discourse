@@ -6,9 +6,150 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+
+
+# Presentation names for this script only; source values and research rules are unchanged.
+FIELD_NAMES = {
+    "说明": "description",
+    "项目": "item",
+    "一级主题编号": "primary_topic_number",
+    "一级主题名称": "primary_topic_title",
+    "二级主题编号": "secondary_topic_number",
+    "二级主题名称": "secondary_topic_title",
+    "关键词": "keywords",
+    "代表评论": "representative_comments",
+    "完全不相关标记": "unrelated_flag",
+    "分类来源": "classification_source",
+    "占本一级主题比例": "within_primary_topic_share",
+    "平均一级边界差距": "mean_primary_boundary_margin",
+    "平均二级主题相似度": "mean_secondary_similarity",
+    "需人工复核数": "manual_review_count",
+    "评论ID": "comment_id",
+    "来源文件": "source_filename",
+    "视频ID": "video_identifier",
+    "视频标题": "video_title",
+    "评论类型": "comment_kind",
+    "点赞数": "like_count",
+    "评论文本": "comment_text",
+    "自动关键词命名": "automatic_keyword_name",
+    "原始评论数": "original_comment_count",
+    "最终一级主题编号": "final_primary_topic_no",
+    "最终一级主题名称": "final_primary_topic_name",
+    "最终二级主题编号": "final_secondary_topic_no",
+    "最终二级主题名称": "final_secondary_topic_name",
+    "最终二级主题关键词": "final_secondary_keywords",
+    "第一候选编号": "first_candidate_no",
+    "第一候选一级主题": "first_candidate_primary_topic",
+    "最终纳入分析": "included_in_final_analysis",
+    "原一级主题编号": "original_primary_topic_no",
+    "原一级主题名称": "original_primary_topic_name",
+    "原二级主题编号": "original_secondary_topic_no",
+    "原二级主题名称": "previous_secondary_topic_name",
+    "一级主题判定原因": "primary_assignment_reason",
+    "候选第二一级主题": "second_candidate_primary_topic",
+    "一级主题强化关键词": "primary_boost_keywords",
+    "二级主题关键词": "secondary_keywords",
+    "一级主题相似度": "primary_similarity",
+    "一级主题边界差距": "primary_margin",
+    "不相关规则命中": "unrelated_rule_matches",
+    "二级主题相似度": "secondary_similarity",
+    "二级主题相似度_中心匹配": "secondary_centroid_similarity",
+    "第二候选二级主题编号": "second_candidate_secondary_no",
+    "第二候选二级主题名称": "second_candidate_secondary_name",
+    "第二候选二级主题相似度": "second_candidate_secondary_similarity",
+    "二级主题相似度差": "secondary_similarity_margin",
+    "上一版边界原因类型": "previous_boundary_reason_type",
+    "上一版一级主题相似度": "previous_primary_similarity",
+    "上一版一级主题边界差距": "previous_primary_margin",
+    "第一候选原始相似度_重算": "recomputed_first_candidate_similarity",
+    "第一候选综合得分_重算": "recomputed_first_candidate_score",
+    "第二候选一级主题_重算": "recomputed_second_primary_topic",
+    "第二候选原始相似度_重算": "recomputed_second_candidate_similarity",
+    "第二候选综合得分_重算": "recomputed_second_candidate_score",
+    "第一二候选得分差_重算": "recomputed_candidate_score_margin",
+    "归类可行性": "assignment_feasibility",
+    "人工复核优先级": "manual_review_priority",
+    "强制归类说明": "forced_assignment_notes",
+    "原始7类评论数": "original_seven_topic_count",
+    "新增强制归类数": "added_forced_assignment_count",
+    "占更新后分析样本比例": "updated_analysis_sample_share",
+    "更新后评论数": "updated_comment_count",
+    "平均一级主题相似度": "mean_primary_topic_similarity",
+    "过滤后处理": "post_filter_action",
+    "最终状态": "final_status"
+}
+
+SHEET_NAMES = {
+    "说明": "Notes",
+    "评论一级二级主题": "Comment_topic_hierarchy",
+    "一级二级主题表": "Topic_hierarchy",
+    "10008条边界样本_带标记": "Boundary_10008_flagged",
+    "完全不相关样本_标1": "Unrelated_flagged",
+    "一级主题概览_更新": "Primary_updated",
+    "一级二级主题表_更新": "Hierarchy_updated",
+    "评论分类_更新33816": "Comments_updated33816",
+    "强制归类9859": "Forced_assignment9859",
+    "过滤149": "Filtered149",
+    "全部评论状态33965": "All_comment_status33965"
+}
+
+def english_name(name):
+    return FIELD_NAMES.get(name, name)
+
+
+def english_sheet(name):
+    return SHEET_NAMES.get(name, name)
+
+
+def resolve_sheet(names, requested):
+    """Prefer the requested historical name; also accept the English export name."""
+    return requested if requested in names else english_sheet(requested)
+
+
+def _rename_checked(frame, mapping):
+    columns = [mapping.get(c, c) for c in frame.columns]
+    if len(set(columns)) != len(columns):
+        raise ValueError("Ambiguous table schema: column aliases would produce duplicate names")
+    result = frame.copy()
+    result.columns = columns
+    result.index.names = [mapping.get(n, n) for n in result.index.names]
+    return result
+
+
+def export_frame(frame):
+    """Return an English-header copy without changing any values or row order."""
+    if isinstance(frame, pd.Series):
+        result = frame.copy()
+        result.name = english_name(result.name)
+        result.index.names = [english_name(n) for n in result.index.names]
+        return result
+    return _rename_checked(frame, FIELD_NAMES)
+
+
+def read_excel_compatible(path, *args, **kwargs):
+    """Read either export schema into the unchanged historical internal schema.
+
+    All pipeline calls use a single sheet. Keyword dtype keys are adapted to the
+    actual sheet headers before parsing so string identifiers remain strings.
+    """
+    with pd.ExcelFile(path) as book:
+        requested = kwargs.pop("sheet_name", args[0] if args else 0)
+        rest = args[1:] if args else ()
+        actual = resolve_sheet(book.sheet_names, requested)
+        if isinstance(kwargs.get("dtype"), dict):
+            headers = pd.read_excel(book, sheet_name=actual, nrows=0).columns
+            kwargs["dtype"] = {
+                k if k in headers else english_name(k): v
+                for k, v in kwargs["dtype"].items()
+            }
+        frame = pd.read_excel(book, *rest, sheet_name=actual, **kwargs)
+    return _rename_checked(frame, {v: k for k, v in FIELD_NAMES.items()})
+
+
 
 
 MODEL = "Qwen/Qwen3-Embedding-8B"
@@ -77,11 +218,11 @@ def autofit_and_style(path: Path) -> None:
                 value = "" if cell.value is None else str(cell.value)
                 max_len = max(max_len, min(len(value), 80))
             width = min(max(max_len + 2, 10), 42)
-            if any(key in header for key in ["评论文本", "代表评论", "说明", "解释", "理由"]):
+            if any(key in header for key in ["text", "comments", "description", "explanation", "reason"]):
                 width = 48
             ws.column_dimensions[get_column_letter(idx)].width = width
 
-        if ws.title == "说明":
+        if ws.title == english_sheet("说明"):
             for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
                 for cell in row:
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
@@ -101,61 +242,61 @@ def _resolve_one(directory: Path, patterns: tuple[str, ...], label: str) -> Path
         matches = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
         if matches:
             if len(matches) > 1:
-                print(f"[warn] {label} 匹配到 {len(matches)} 个文件，使用最新的：{matches[0].name}")
+                print(f"[warn] {label} matched {len(matches)} files; using the latest: {matches[0].name}")
             return matches[0]
     raise FileNotFoundError(
-        f"未找到{label}。在 {directory} 下按 {patterns} 查找均无结果，请用 CLI 参数显式指定。"
+        f"Not found: {label}. In {directory}, using patterns {patterns} found no matches; specify the CLI argument explicitly."
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="边界样本强制归类工作簿：对 BERTopic 标记为边界/噪声的评论做强制一级二级主题归类"
+        description='Legacy forced assignment workbook for BERTopic boundary/noise comments (deprecated)'
     )
     parser.add_argument(
         "--input-dir",
         type=Path,
         default=Path(os.environ.get("BFD_TOPIC_OUTPUT_DIR", "output/topic_classification")),
-        help="BERTopic 输出目录（环境变量 BFD_TOPIC_OUTPUT_DIR）",
+        help='BERTopic output directory (environment variable BFD_TOPIC_OUTPUT_DIR)',
     )
-    parser.add_argument("--main-file", type=Path, default=None, help="一级二级主题分类工作簿（含「评论一级二级主题」sheet）")
-    parser.add_argument("--boundary-file", type=Path, default=None, help="边界不清样本逐条分析工作簿（含完全不相关标记）")
-    parser.add_argument("--cache-file", type=Path, default=None, help=f"嵌入缓存 npz，默认 <input-dir>/{EMBEDDING_CACHE_NAME}")
-    parser.add_argument("--out-file", type=Path, default=None, help="输出工作簿路径，默认自动生成带时间戳文件名")
+    parser.add_argument("--main-file", type=Path, default=None, help='Topic hierarchy workbook (Comment_topic_hierarchy sheet; historical name also accepted)')
+    parser.add_argument("--boundary-file", type=Path, default=None, help='Boundary comment analysis workbook with unrelated flags')
+    parser.add_argument("--cache-file", type=Path, default=None, help=f"Embedding cache NPZ; default: <input-dir>/{EMBEDDING_CACHE_NAME}")
+    parser.add_argument("--out-file", type=Path, default=None, help='Output workbook path; defaults to a timestamped filename')
     args = parser.parse_args()
 
     project_dir = args.input_dir
     output_dir = project_dir
     if not project_dir.is_dir():
         raise NotADirectoryError(
-            f"输入目录不存在：{project_dir}\n"
-            f"请先运行 bertopic_api.py 产出主题分类结果，或用 --input-dir 指定。"
+            f"Input directory does not exist: {project_dir}\n"
+            f"Run bertopic_api.py first or specify --input-dir."
         )
 
     main_path = args.main_file or _resolve_one(
         output_dir,
         ("一级二级主题表_*论文命名*.xlsx", "一级二级主题表_*7类*.xlsx", "一级二级主题表_*.xlsx"),
-        "一级二级主题分类工作簿",
+        'Topic hierarchy workbook',
     )
     boundary_filter_path = args.boundary_file or _resolve_one(
         output_dir,
         ("边界不清样本_完全不相关标记_*.xlsx", "边界不清样本*.xlsx"),
-        "边界样本标记工作簿",
+        'Flagged boundary workbook',
     )
     cache_path = args.cache_file or (project_dir / EMBEDDING_CACHE_NAME)
-    print(f"[in ] 主题分类工作簿 : {main_path}")
-    print(f"[in ] 边界标记工作簿 : {boundary_filter_path}")
-    print(f"[in ] 嵌入缓存       : {cache_path}")
+    print(f"[in ] Topic classification workbook: {main_path}")
+    print(f"[in ] Flagged boundary workbook: {boundary_filter_path}")
+    print(f"[in ] Embedding cache: {cache_path}")
 
     main_sheet = "评论一级二级主题"
     hierarchy_sheet = "一级二级主题表"
     boundary_sheet = "10008条边界样本_带标记"
     filtered_sheet = "完全不相关样本_标1"
 
-    comments = pd.read_excel(main_path, sheet_name=main_sheet)
-    old_hierarchy = pd.read_excel(main_path, sheet_name=hierarchy_sheet)
-    boundary = pd.read_excel(boundary_filter_path, sheet_name=boundary_sheet)
-    filtered_149 = pd.read_excel(boundary_filter_path, sheet_name=filtered_sheet)
+    comments = read_excel_compatible(main_path, sheet_name=main_sheet)
+    old_hierarchy = read_excel_compatible(main_path, sheet_name=hierarchy_sheet)
+    boundary = read_excel_compatible(boundary_filter_path, sheet_name=boundary_sheet)
+    filtered_149 = read_excel_compatible(boundary_filter_path, sheet_name=filtered_sheet)
 
     comments["doc_id"] = comments["doc_id"].astype(int)
     comments["二级主题编号"] = comments["二级主题编号"].apply(normalize_secondary_no)
@@ -168,26 +309,26 @@ def main() -> None:
     force_ids = set(boundary.loc[boundary["完全不相关标记"].eq(0), "评论ID"].tolist())
 
     if len(boundary_ids) != 10008:
-        raise RuntimeError(f"边界样本数量不是 10008，而是 {len(boundary_ids)}")
+        raise RuntimeError(f"Expected 10008 boundary samples; found {len(boundary_ids)}")
     if len(filtered_ids) != 149:
-        raise RuntimeError(f"过滤样本数量不是 149，而是 {len(filtered_ids)}")
+        raise RuntimeError(f"Expected 149 filtered samples; found {len(filtered_ids)}")
     if len(force_ids) != 9859:
-        raise RuntimeError(f"强制归类样本数量不是 9859，而是 {len(force_ids)}")
+        raise RuntimeError(f"Expected 9859 forced assignments; found {len(force_ids)}")
     if not boundary_ids.issubset(set(comments["doc_id"])):
         missing = sorted(boundary_ids - set(comments["doc_id"]))[:10]
-        raise RuntimeError(f"边界样本 ID 无法在主表中找到，示例：{missing}")
+        raise RuntimeError(f"Boundary IDs missing from the main table; examples: {missing}")
 
     boundary_main = comments.loc[comments["doc_id"].isin(boundary_ids), ["doc_id", "text", "一级主题名称"]].copy()
     if not boundary_main["一级主题名称"].eq("边界不清/其他").all():
         bad = boundary_main.loc[~boundary_main["一级主题名称"].eq("边界不清/其他"), "doc_id"].head(10).tolist()
-        raise RuntimeError(f"有边界样本在主表中不是“边界不清/其他”，示例：{bad}")
+        raise RuntimeError(f"Some boundary samples do not have the original boundary/other label; examples: {bad}")
 
     cache = np.load(cache_path, allow_pickle=False)
     hashes = [text_hash(text) for text in comments["text"].astype(str).tolist()]
     cache_keys = set(cache.files)
     missing_hashes = [h for h in hashes if h not in cache_keys]
     if missing_hashes:
-        raise RuntimeError(f"embedding 缓存缺失 {len(missing_hashes)} 条，示例：{missing_hashes[:5]}")
+        raise RuntimeError(f"Embedding cache is missing {len(missing_hashes)} entries; examples: {missing_hashes[:5]}")
 
     embeddings = np.vstack([cache[h] for h in hashes]).astype(np.float32)
     vectors = safe_l2_normalize(embeddings)
@@ -230,7 +371,7 @@ def main() -> None:
         primary_no = int(row["最终一级主题编号"])
         candidates = centroids_by_primary.get(primary_no, [])
         if not candidates:
-            raise RuntimeError(f"一级主题 {primary_no} 没有可用二级主题中心")
+            raise RuntimeError(f"Primary topic {primary_no} has no available secondary topic centroids")
         vec = vectors[doc_to_pos[doc_id]]
         centers = np.vstack([c["centroid"] for c in candidates])
         sims = vec @ centers.T
@@ -395,13 +536,13 @@ def main() -> None:
     ]
 
     notes = pd.DataFrame([
-        ["输出目的", "将原“边界不清/其他”的 10008 条中，去掉 149 条完全不相关/纯玩梗评论；剩余 9859 条强制归入 7 个一级主题，并计算其所属二级主题。"],
-        ["一级主题归类", "使用边界逐条分析表中的“第一候选一级主题/若强制归类_建议一级主题”。这些样本原本因相似度不足或第一二候选过近被保留为边界，本文件为后续分析提供强制归类版本。"],
-        ["二级主题归类", "在强制归入的一级主题内部，使用已有正式样本计算每个二级主题的归一化 embedding 中心；边界样本归入与其 embedding 余弦相似度最高的二级主题。"],
-        ["更新后分析样本", f"{analysis_total} 条，即原正式 7 类样本 {len(valid_original)} 条 + 强制归类样本 {len(force_ids)} 条。"],
-        ["过滤样本", f"{len(filtered_ids)} 条，单独放在“过滤149”sheet，不进入更新后主题汇总。"],
-        ["总评论数核对", f"{len(comments)} = 更新后分析样本 {analysis_total} + 过滤样本 {len(filtered_ids)}。"],
-        ["主要阅读顺序", "先看“一级主题概览_更新”，再看“一级二级主题表_更新”，逐条结果看“评论分类_更新33816”；被过滤样本看“过滤149”。"],
+        ["Purpose", "Historical forced-assignment variant: remove 149 unrelated/joke comments from 10008 boundary cases, then assign the remaining 9859 to the existing seven primary topics and their secondary topics."],
+        ["Primary assignment", "Use the first candidate from the boundary analysis table. These comments were originally retained as boundary cases because of low similarity or narrow candidate margins. This legacy output supplies a forced-assignment variant."],
+        ["Secondary assignment", "Within the assigned primary topic, compute normalized embedding centroids from existing formal samples and select the secondary topic with the highest cosine similarity."],
+        ["Updated analysis sample", f"{analysis_total} comments: {len(valid_original)} original formal comments plus {len(force_ids)} forced assignments."],
+        ["Filtered samples", f"{len(filtered_ids)} comments in Filtered149, excluded from updated topic summaries."],
+        ["Total count check", f"{len(comments)} = {analysis_total} updated analysis comments + {len(filtered_ids)} filtered comments."],
+        ["Suggested reading order", "Read Primary_updated, Hierarchy_updated, Comments_updated33816 and Filtered149."],
     ], columns=["项目", "说明"])
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -409,13 +550,13 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        notes.to_excel(writer, sheet_name="说明", index=False)
-        primary_summary.to_excel(writer, sheet_name="一级主题概览_更新", index=False)
-        sec_summary.to_excel(writer, sheet_name="一级二级主题表_更新", index=False)
-        updated.to_excel(writer, sheet_name="评论分类_更新33816", index=False)
-        forced_detail.to_excel(writer, sheet_name="强制归类9859", index=False)
-        filtered_detail.to_excel(writer, sheet_name="过滤149", index=False)
-        all_status.to_excel(writer, sheet_name="全部评论状态33965", index=False)
+        export_frame(notes).to_excel(writer, sheet_name=english_sheet("说明"), index=False)
+        export_frame(primary_summary).to_excel(writer, sheet_name=english_sheet("一级主题概览_更新"), index=False)
+        export_frame(sec_summary).to_excel(writer, sheet_name=english_sheet("一级二级主题表_更新"), index=False)
+        export_frame(updated).to_excel(writer, sheet_name=english_sheet("评论分类_更新33816"), index=False)
+        export_frame(forced_detail).to_excel(writer, sheet_name=english_sheet("强制归类9859"), index=False)
+        export_frame(filtered_detail).to_excel(writer, sheet_name=english_sheet("过滤149"), index=False)
+        export_frame(all_status).to_excel(writer, sheet_name=english_sheet("全部评论状态33965"), index=False)
 
     autofit_and_style(out_path)
 
@@ -425,7 +566,7 @@ def main() -> None:
         "updated_analysis_rows": int(len(updated)),
         "forced_rows": int(len(forced_detail)),
         "filtered_rows": int(len(filtered_detail)),
-        "primary_counts": primary_summary[["一级主题名称", "更新后评论数", "新增强制归类数"]].to_dict("records"),
+        "primary_counts": export_frame(primary_summary[["一级主题名称", "更新后评论数", "新增强制归类数"]]).to_dict("records"),
         "secondary_rows": int(len(sec_summary)),
     }
     print(checks)

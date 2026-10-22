@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 # Category labels live in a shared module so every stage uses the same vocabulary.
@@ -22,6 +23,127 @@ from video_categories import (  # noqa: E402
     MISSING_VIDEO_METADATA,
     standardize_category_column,
 )
+
+
+# Presentation names for this script only; source values and research rules are unchanged.
+FIELD_NAMES = {
+    "样本数": "sample_count",
+    "评论数": "comment_count",
+    "规范二级主题名称": "canonical_secondary_topic_name",
+    "完全不相关标记": "unrelated_flag",
+    "分类来源": "classification_source",
+    "视频数": "video_count",
+    "评论获赞数": "comment_likes_total",
+    "平均情绪分": "mean_sentiment_score",
+    "中位情绪分": "median_sentiment_score",
+    "获赞加权情绪分": "like_weighted_sentiment_score",
+    "净积极占比": "net_positive_share",
+    "情绪极化占比": "polarized_sentiment_share",
+    "平均点赞": "mean_likes",
+    "人工复核占比": "manual_review_share",
+    "消极占比差_百分点": "negative_share_difference_pp",
+    "积极占比差_百分点": "positive_share_difference_pp",
+    "消极提升倍数": "negative_lift",
+    "变量": "variable",
+    "类别数": "category_count",
+    "卡方": "chi_square",
+    "p值": "p_value",
+    "关键词组": "keyword_group",
+    "匹配规则": "matching_pattern",
+    "视频评论量": "video_comment_count",
+    "视频点赞量": "video_like_count",
+    "视频播放量": "video_view_count",
+    "视频评论率": "video_comment_rate",
+    "视频认可率": "video_approval_rate",
+    "变量1": "variable_1",
+    "变量2": "variable_2",
+    "Pearson相关": "pearson_correlation",
+    "Spearman相关": "spearman_correlation",
+    "主题名称": "video_theme_name",
+    "四分区": "video_partition_name",
+    "积极占比": "positive_share",
+    "中立占比": "neutral_share",
+    "消极占比": "negative_share",
+    "积极数": "positive_count",
+    "积极获赞数": "positive_likes",
+    "积极获赞占比": "positive_like_share",
+    "中立数": "neutral_count",
+    "中立获赞数": "neutral_likes",
+    "中立获赞占比": "neutral_like_share",
+    "消极数": "negative_count",
+    "消极获赞数": "negative_likes",
+    "消极获赞占比": "negative_like_share"
+}
+
+SHEET_NAMES = {
+    "评论分类_更新": "Comments_updated"
+}
+
+def english_name(name):
+    return FIELD_NAMES.get(name, name)
+
+
+def english_sheet(name):
+    return SHEET_NAMES.get(name, name)
+
+
+def resolve_sheet(names, requested):
+    """Prefer the requested historical name; also accept the English export name."""
+    return requested if requested in names else english_sheet(requested)
+
+
+def _rename_checked(frame, mapping):
+    columns = [mapping.get(c, c) for c in frame.columns]
+    if len(set(columns)) != len(columns):
+        raise ValueError("Ambiguous table schema: column aliases would produce duplicate names")
+    result = frame.copy()
+    result.columns = columns
+    result.index.names = [mapping.get(n, n) for n in result.index.names]
+    return result
+
+
+def export_frame(frame):
+    """Return an English-header copy without changing any values or row order."""
+    if isinstance(frame, pd.Series):
+        result = frame.copy()
+        result.name = english_name(result.name)
+        result.index.names = [english_name(n) for n in result.index.names]
+        return result
+    return _rename_checked(frame, FIELD_NAMES)
+
+
+def read_excel_compatible(path, *args, **kwargs):
+    """Read either export schema into the unchanged historical internal schema.
+
+    All pipeline calls use a single sheet. Keyword dtype keys are adapted to the
+    actual sheet headers before parsing so string identifiers remain strings.
+    """
+    with pd.ExcelFile(path) as book:
+        requested = kwargs.pop("sheet_name", args[0] if args else 0)
+        rest = args[1:] if args else ()
+        actual = resolve_sheet(book.sheet_names, requested)
+        if isinstance(kwargs.get("dtype"), dict):
+            headers = pd.read_excel(book, sheet_name=actual, nrows=0).columns
+            kwargs["dtype"] = {
+                k if k in headers else english_name(k): v
+                for k, v in kwargs["dtype"].items()
+            }
+        frame = pd.read_excel(book, *rest, sheet_name=actual, **kwargs)
+    return _rename_checked(frame, {v: k for k, v in FIELD_NAMES.items()})
+
+
+def english_keys(value):
+    """Translate JSON field names only; preserve all scalar data values."""
+    if isinstance(value, dict):
+        keys = [english_name(k) for k in value]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Ambiguous JSON schema: duplicate field aliases")
+        return {english_name(k): english_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [english_keys(v) for v in value]
+    return value
+
+
 
 
 # --- Path configuration ---------------------------------------------------------------
@@ -105,8 +227,8 @@ def json_sanitize(value: Any) -> Any:
 
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     comments = pd.read_excel(SENTIMENT_FILE)
-    topics = pd.read_excel(TOPIC_FILE, sheet_name="评论分类_更新")
-    # Accept `analytic_category` or the legacy `学术分类`, and normalise labels to English.
+    topics = read_excel_compatible(TOPIC_FILE, sheet_name="评论分类_更新")
+    # Accept `analytic_category` or the legacy the legacy Chinese category header, and normalise labels to English.
     videos = standardize_category_column(pd.read_excel(VIDEO_FILE))
 
     comments["Comment_ID"] = clean_id(comments["Comment_ID"])
@@ -398,12 +520,12 @@ def as_records(df: pd.DataFrame, max_rows: int | None = None) -> list[dict[str, 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="主题 × 情感 × 视频类别交叉分析（论文 RQ3 / RQ4）"
+        description='Topic, sentiment and video-category cross analysis (paper RQ3/RQ4)'
     )
-    parser.add_argument("--sentiment-file", type=Path, default=None, help="情感分析结果表 xlsx")
-    parser.add_argument("--topic-file", type=Path, default=None, help="主题分类结果表 xlsx（sheet: 评论分类_更新）")
-    parser.add_argument("--video-file", type=Path, default=None, help="视频信息表 xlsx（含「学术分类」列）")
-    parser.add_argument("--out-dir", type=Path, default=None, help="输出目录，默认 output/sentiment_topic_video_analysis")
+    parser.add_argument("--sentiment-file", type=Path, default=None, help='Sentiment analysis workbook')
+    parser.add_argument("--topic-file", type=Path, default=None, help='Topic classification workbook (sheet: Comments_updated; historical Chinese name also accepted)')
+    parser.add_argument("--video-file", type=Path, default=None, help='Video information workbook with an analytic category column')
+    parser.add_argument("--out-dir", type=Path, default=None, help='Output directory; default: output/sentiment_topic_video_analysis')
     return parser.parse_args()
 
 
@@ -420,10 +542,10 @@ def main() -> None:
         OUTPUT_DIR = args.out_dir
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for label, path in [("情感分析结果表", SENTIMENT_FILE), ("主题分类结果表", TOPIC_FILE), ("视频信息表", VIDEO_FILE)]:
+    for label, path in [('Sentiment analysis table', SENTIMENT_FILE), ('Topic classification table', TOPIC_FILE), ('Video information table', VIDEO_FILE)]:
         if not Path(path).is_file():
             raise FileNotFoundError(
-                f"{label}不存在：{path}\n"
+                f"{label} does not exist: {path}\n"
                 f"请用对应 CLI 参数指定，或设置环境变量 BFD_DATA_ROOT（当前 {_DATA_ROOT}），"
                 f"并将文件放到 <BFD_DATA_ROOT>/derived/ 下，命名见 data/README.md"
             )
@@ -480,9 +602,9 @@ def main() -> None:
             "video_file": str(VIDEO_FILE),
             "label_order": LABEL_ORDER,
             "notes": [
-                "分析样本为评论情绪表与评论分类_更新表的交集，并剔除主题分类本标记为完全不相关的样本。",
-                "视频学术分类没有独立情绪标签；本分析统计该学术分类下相关评论的情绪分布。",
-                "关键词组为非互斥匹配，同一评论可进入多个关键词组。",
+                'The analysis uses the intersection of sentiment records and Comments_updated, excluding comments flagged as unrelated in the topic table.',
+                'Video analytic categories have no independent sentiment labels; this analysis summarizes sentiment among their associated comments.',
+                'Keyword groups are nonexclusive; a comment may match multiple groups.',
             ],
         },
         "diagnostics": {**diagnostics, **coverage},
@@ -515,7 +637,7 @@ def main() -> None:
 
     json_path = OUTPUT_DIR / "analysis_payload.json"
     with json_path.open("w", encoding="utf-8") as f:
-        json.dump(json_sanitize(payload), f, ensure_ascii=False, indent=2)
+        json.dump(english_keys(json_sanitize(payload)), f, ensure_ascii=False, indent=2)
 
     def show_table(name: str, records: list[dict[str, Any]], cols: list[str], n: int = 8) -> None:
         print(f"\n{name}")
@@ -523,14 +645,14 @@ def main() -> None:
             print("(empty)")
             return
         frame = pd.DataFrame(records).head(n)
-        print(frame[cols].to_string(index=False))
+        print(export_frame(frame[cols]).to_string(index=False))
 
-    print("输出:", json_path)
-    print("诊断:", json.dumps(json_sanitize(payload["diagnostics"]), ensure_ascii=False, indent=2))
-    print("总体:", json.dumps(json_sanitize(overall), ensure_ascii=False, indent=2))
-    show_table("一级主题", payload["tables"]["primary"], ["primary_topic_label", "评论数", "积极占比", "中立占比", "消极占比", "平均情绪分", "获赞加权情绪分"])
-    show_table("高消极二级主题", payload["tables"]["high_neg_secondary"], ["secondary_topic_label", "评论数", "积极占比", "中立占比", "消极占比", "平均情绪分"])
-    show_table("学术分类", payload["tables"]["academic"], ["academic_class", "评论数", "积极占比", "中立占比", "消极占比", "平均情绪分"])
+    print('Output:', json_path)
+    print('Diagnostics:', json.dumps(json_sanitize(payload["diagnostics"]), ensure_ascii=False, indent=2))
+    print('Overall:', json.dumps(english_keys(json_sanitize(overall)), ensure_ascii=False, indent=2))
+    show_table('Primary topics', payload["tables"]["primary"], ["primary_topic_label", "评论数", "积极占比", "中立占比", "消极占比", "平均情绪分", "获赞加权情绪分"])
+    show_table('Secondary topics with high negative sentiment', payload["tables"]["high_neg_secondary"], ["secondary_topic_label", "评论数", "积极占比", "中立占比", "消极占比", "平均情绪分"])
+    show_table('Analytic categories', payload["tables"]["academic"], ["academic_class", "评论数", "积极占比", "中立占比", "消极占比", "平均情绪分"])
 
 
 if __name__ == "__main__":

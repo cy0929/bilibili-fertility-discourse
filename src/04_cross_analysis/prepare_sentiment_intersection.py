@@ -7,6 +7,73 @@ from pathlib import Path
 import openpyxl
 
 
+# Presentation names for this script only; source values and research rules are unchanged.
+FIELD_NAMES = {
+    "是否在主题样本": "in_topic_sample",
+    "保留原表行号": "retained_source_row",
+    "保留情绪": "retained_sentiment",
+    "保留分数": "retained_score",
+    "保留点赞": "retained_likes",
+    "丢弃原表行号": "discarded_source_row",
+    "丢弃情绪": "discarded_sentiment",
+    "丢弃分数": "discarded_score",
+    "丢弃点赞": "discarded_likes",
+    "说明": "description",
+    "项目": "item",
+    "评论内容": "comment_content",
+    "评论文本": "comment_text",
+    "评论正文": "comment_body",
+    "用户评论": "user_comment",
+    "评论": "comment",
+    "标题": "video_title",
+    "视频ID": "video_identifier",
+    "主题名称": "video_theme_name",
+    "学术分类": "analytic_category",
+    "四分区": "video_partition_name",
+    "已失效视频": "invalid_video_flag",
+    "评论ID": "comment_id",
+    "根评论ID": "root_comment_id",
+    "点赞数": "like_count",
+    "情绪标签": "sentiment_label",
+    "情绪分数": "sentiment_score"
+}
+
+SHEET_NAMES = {
+    "评论分类_更新": "Comments_updated",
+    "01_总体情绪": "01_Overall_sentiment"
+}
+
+def english_name(name):
+    return FIELD_NAMES.get(name, name)
+
+
+
+def english_headers(headers):
+    """Translate copied source headers without changing any table data or order."""
+    reserved = {h for h in headers if isinstance(h, str) and not any("\u3400" <= c <= "\u9fff" for c in h)}
+    output = []
+    for index, header in enumerate(headers, 1):
+        name = header
+        if isinstance(header, str) and any("\u3400" <= c <= "\u9fff" for c in header):
+            name = FIELD_NAMES.get(header, f"source_field_{index}")
+            while name in reserved:
+                name += f"_source_{index}"
+            reserved.add(name)
+        output.append(name)
+    return output
+
+
+def english_sheet(name):
+    return SHEET_NAMES.get(name, name)
+
+
+def resolve_sheet(names, requested):
+    """Prefer the requested historical name; also accept the English export name."""
+    return requested if requested in names else english_sheet(requested)
+
+
+
+
 # Path priority: env vars BFD_DATA_ROOT / BFD_OUTPUT_ROOT > default "data" / "output"
 _DATA_ROOT = Path(os.environ.get("BFD_DATA_ROOT", "data"))
 BASE = _DATA_ROOT
@@ -30,7 +97,7 @@ def json_value(value):
 
 def load_sheet_rows(path, sheet_name):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb[sheet_name]
+    ws = wb[resolve_sheet(wb.sheetnames, sheet_name)]
     iterator = ws.iter_rows(values_only=True)
     header = [json_value(v) for v in next(iterator)]
     rows = []
@@ -43,7 +110,7 @@ def load_sheet_rows(path, sheet_name):
 
 def read_analysis_overall(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb["01_总体情绪"]
+    ws = wb[resolve_sheet(wb.sheetnames, "01_总体情绪")]
     observed = {}
     for row in ws.iter_rows(min_row=1, max_row=20, max_col=4, values_only=True):
         label, count, _share, likes = row
@@ -130,32 +197,32 @@ def main():
 
     analysis_overall = read_analysis_overall(ANALYSIS_FILE)
     diagnostics = [
-        ["指标", "数值", "说明"],
-        ["情绪表数据行数", len(sentiment_rows), "原始情绪分析数据，不含表头"],
-        ["情绪表唯一 Comment_ID", len(sentiment_id_set), "按 Comment_ID 去重后"],
-        ["情绪表重复 Comment_ID 数", len(duplicate_ids), "存在 30 个重复 ID"],
-        ["主题样本数据行数", len(topic_rows), "评论分类_更新，不含表头"],
-        ["主题样本唯一 root_comment_id", len(topic_id_set), "该表无重复 root_comment_id"],
-        ["交集唯一评论数", len(topic_id_set & sentiment_id_set), "root_comment_id ∩ Comment_ID"],
-        ["情绪表未进入主题样本的唯一评论数", len(sentiment_id_set - topic_id_set), "保留在原始情绪表，但不进入 v2.0"],
-        ["主题样本缺失情绪的评论数", len(topic_id_set - sentiment_id_set), "应为 0"],
-        ["直接筛选会得到的行数", sum(1 for _idx, row, _values in sentiment_rows if row.get("Comment_ID") in topic_id_set), "因 28 个重复 ID 落在主题样本内，会多出 28 行"],
-        ["v2.0 输出评论数", len(output_rows), "按主题样本顺序，每个 root_comment_id 保留情绪表第一次出现记录"],
-        ["积极评论数", label_counts.get("积极", 0), "用于对齐现有交叉分析总体情绪"],
-        ["中立评论数", label_counts.get("中立", 0), "用于对齐现有交叉分析总体情绪"],
-        ["消极评论数", label_counts.get("消极", 0), "用于对齐现有交叉分析总体情绪"],
-        ["平均情绪分", round(sum(scores) / len(scores), 6) if scores else None, "sentiment_score 平均值"],
-        ["既有分析-积极评论数", analysis_overall.get("积极", {}).get("count"), "来自 01_总体情绪，用于校验"],
-        ["既有分析-中立评论数", analysis_overall.get("中立", {}).get("count"), "来自 01_总体情绪，用于校验"],
-        ["既有分析-消极评论数", analysis_overall.get("消极", {}).get("count"), "来自 01_总体情绪，用于校验"],
-        ["生成口径", "Comment_ID = root_comment_id", "以主题样本为基准取交集，保留情绪表原字段"],
+        ["Metric", "Value", "Description"],
+        ["Sentiment table data rows", len(sentiment_rows), "Original sentiment data, excluding the header"],
+        ["Unique sentiment Comment_ID values", len(sentiment_id_set), "After deduplication by Comment_ID"],
+        ["Duplicated sentiment Comment_ID values", len(duplicate_ids), "The historical dataset contains 30 duplicated IDs"],
+        ["Topic sample data rows", len(topic_rows), "Comments_updated, excluding the header"],
+        ["Unique topic root_comment_id values", len(topic_id_set), "The historical table has no duplicated root_comment_id values"],
+        ["Unique comments in the intersection", len(topic_id_set & sentiment_id_set), "root_comment_id ∩ Comment_ID"],
+        ["Unique sentiment comments outside the topic sample", len(sentiment_id_set - topic_id_set), "Retained in the original sentiment table; excluded from v2.0"],
+        ["Topic comments missing sentiment", len(topic_id_set - sentiment_id_set), "Expected: 0"],
+        ["Rows obtained by direct filtering", sum(1 for _idx, row, _values in sentiment_rows if row.get("Comment_ID") in topic_id_set), "The historical topic sample contains 28 duplicated IDs, producing 28 extra rows"],
+        ["v2.0 output comment count", len(output_rows), "Follow topic sample order and retain the first sentiment record for each root_comment_id"],
+        ["Positive comment count", label_counts.get("积极", 0), "For comparison with overall sentiment in the existing cross analysis"],
+        ["Neutral comment count", label_counts.get("中立", 0), "For comparison with overall sentiment in the existing cross analysis"],
+        ["Negative comment count", label_counts.get("消极", 0), "For comparison with overall sentiment in the existing cross analysis"],
+        ["Mean sentiment score", round(sum(scores) / len(scores), 6) if scores else None, "Mean of sentiment_score"],
+        ["Existing analysis: positive comment count", analysis_overall.get("积极", {}).get("count"), "From the overall sentiment sheet, for validation"],
+        ["Existing analysis: neutral comment count", analysis_overall.get("中立", {}).get("count"), "From the overall sentiment sheet, for validation"],
+        ["Existing analysis: negative comment count", analysis_overall.get("消极", {}).get("count"), "From the overall sentiment sheet, for validation"],
+        ["Construction rule", "Comment_ID = root_comment_id", "Intersect with the topic sample as the reference; retain the original sentiment fields"],
     ]
 
     payload = {
-        "main_header": sentiment_header,
+        "main_header": english_headers(sentiment_header),
         "main_rows": output_rows,
         "diagnostics": diagnostics,
-        "duplicate_detail_header": duplicate_detail_header,
+        "duplicate_detail_header": [english_name(h) for h in duplicate_detail_header],
         "duplicate_detail_rows": duplicate_detail_rows,
         "source_files": {
             "sentiment": str(SENTIMENT_FILE),

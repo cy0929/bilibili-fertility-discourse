@@ -10,7 +10,7 @@ categories. The English names below are the ones used in the manuscript:
      and Class Survival, and (5) Pan-Entertainment and Cultural Projection."
 
 Early exports of the video table carry the Chinese labels and the Chinese column name
-`学术分类`. Both spellings are accepted on input and normalised to the English form, so
+the legacy Chinese category header. Both spellings are accepted on input and normalised to the English form, so
 the analysis scripts run unchanged against either generation of the source file.
 
 See ``data/README.md`` for the full label table.
@@ -20,7 +20,7 @@ from __future__ import annotations
 import pandas as pd
 
 # --- Column name -------------------------------------------------------------
-# `analytic_category` is the canonical name; `学术分类` is accepted for legacy files.
+# `analytic_category` is the canonical name; the legacy Chinese category header is accepted for legacy files.
 CATEGORY_COLUMN = "analytic_category"
 LEGACY_CATEGORY_COLUMN = "学术分类"
 CATEGORY_COLUMNS: tuple[str, ...] = (CATEGORY_COLUMN, LEGACY_CATEGORY_COLUMN)
@@ -52,7 +52,7 @@ def resolve_category_column(df: pd.DataFrame) -> str:
         if col in df.columns:
             return col
     raise KeyError(
-        f"缺少视频学术分类列，期望之一 {list(CATEGORY_COLUMNS)}；实际列：{list(df.columns)}"
+        f"Video analytic category column missing; expected one of {list(CATEGORY_COLUMNS)}; actual columns: {list(df.columns)}"
     )
 
 
@@ -66,7 +66,7 @@ def normalize_category_values(values: pd.Series) -> pd.Series:
     }
     if unexpected:
         print(
-            f"[warn] 未识别的视频分类取值（保持原样）：{sorted(unexpected)}",
+            f"[warn] Unrecognized video category values (preserved): {sorted(unexpected)}",
         )
     return mapped
 

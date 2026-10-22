@@ -39,9 +39,46 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+
 # Category labels live in a shared module so every stage uses the same vocabulary.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from video_categories import CATEGORY_COLUMN, CATEGORY_LABELS, standardize_category_column  # noqa: E402
+
+
+# Presentation names for this script only; source values and research rules are unchanged.
+FIELD_NAMES = {
+    "评论率": "comment_rate",
+    "弹幕率": "danmaku_rate",
+    "点赞率": "like_rate",
+    "投币率": "coin_rate",
+    "收藏率": "favorite_rate",
+    "分享率": "share_rate"
+}
+
+def english_name(name):
+    return FIELD_NAMES.get(name, name)
+
+
+def _rename_checked(frame, mapping):
+    columns = [mapping.get(c, c) for c in frame.columns]
+    if len(set(columns)) != len(columns):
+        raise ValueError("Ambiguous table schema: column aliases would produce duplicate names")
+    result = frame.copy()
+    result.columns = columns
+    result.index.names = [mapping.get(n, n) for n in result.index.names]
+    return result
+
+
+def export_frame(frame):
+    """Return an English-header copy without changing any values or row order."""
+    if isinstance(frame, pd.Series):
+        result = frame.copy()
+        result.name = english_name(result.name)
+        result.index.names = [english_name(n) for n in result.index.names]
+        return result
+    return _rename_checked(frame, FIELD_NAMES)
+
+
 
 # --- Metric definitions: output column name -> raw count column in the video table ---
 INTERACTION_METRICS: dict[str, str] = {
@@ -63,7 +100,7 @@ METRIC_LABELS_ZH: dict[str, str] = {
     "share_rate": "分享率",
 }
 
-# Category column: `analytic_category` (legacy Chinese exports use `学术分类`).
+# Category column: `analytic_category` (legacy Chinese exports use the legacy Chinese category header).
 # Both the column name and the Chinese label values are normalised to English on load;
 # see src/video_categories.py for the five canonical labels.
 VIEWS_COLUMN = "Views"
@@ -71,7 +108,7 @@ VIDEO_ID_COLUMN = "Video_ID"
 INVALID_FLAG_COLUMN = "已失效视频"
 
 # --- Exclusion list for the main analysis ------------------------------------
-# BV1AgcseTEDU: invalid video (flagged as 1 in the source table's `已失效视频` column)
+# BV1AgcseTEDU: invalid video (flagged as 1 in the source table's the source invalid-video flag column)
 # BV1jm421g7pS: sample excluded from the main analysis
 # After exclusion n = 269 (micro 191 / gender 32 / macro-policy 23 / economic 13 /
 # general entertainment 10), exactly consistent with paper Table S1 and Figure 1.
@@ -96,7 +133,7 @@ def resolve_default_video_file() -> Path:
         if path.is_file():
             return path
     raise FileNotFoundError(
-        "未找到视频信息表。请用 --video-file 指定，或把文件放到 "
+        "Video information table not found. Specify --video-file or place it in "
         f"{root / 'raw' / 'video_info.xlsx'}"
     )
 
@@ -105,7 +142,7 @@ def load_and_filter(video_file: Path) -> pd.DataFrame:
     """Read the video table and apply the paper's sample criteria."""
     df = pd.read_excel(video_file, dtype={VIDEO_ID_COLUMN: str})
 
-    # Accept either `analytic_category` or the legacy `学术分类`, and normalise both the
+    # Accept either `analytic_category` or the legacy the legacy Chinese category header, and normalise both the
     # column name and the Chinese label values to the canonical English form.
     df = standardize_category_column(df)
 
@@ -115,7 +152,7 @@ def load_and_filter(video_file: Path) -> pd.DataFrame:
         if col not in df.columns
     ]
     if missing:
-        raise KeyError(f"视频信息表缺少必需列：{missing}；实际列：{list(df.columns)}")
+        raise KeyError(f"Video information table is missing required columns: {missing}; actual columns: {list(df.columns)}")
 
     total = len(df)
 
@@ -131,11 +168,11 @@ def load_and_filter(video_file: Path) -> pd.DataFrame:
 
     step_final = step_valid[~step_valid[VIDEO_ID_COLUMN].isin(EXCLUDED_VIDEO_IDS)].copy()
 
-    print(f"[filter] 原始行数            : {total}")
+    print(f"[filter] Input rows: {total}")
     print(f"[filter] Views > 0           : {len(step_views)}")
-    print(f"[filter] 已编码学术分类      : {len(step_coded)}")
-    print(f"[filter] 排除失效视频        : {len(step_valid)}")
-    print(f"[filter] 排除主分析剔除样本  : {len(step_final)}  <- 论文分析样本 n")
+    print(f"[filter] Coded analytic category: {len(step_coded)}")
+    print(f"[filter] After excluding invalid videos: {len(step_valid)}")
+    print(f"[filter] After main analysis exclusions: {len(step_final)}  <- Paper analysis sample size")
     return step_final
 
 
@@ -173,7 +210,7 @@ def one_way_anova(df: pd.DataFrame) -> pd.DataFrame:
     try:
         from scipy import stats
     except ImportError:  # pragma: no cover
-        print("[warn] 未安装 scipy，跳过 ANOVA。pip install scipy", file=sys.stderr)
+        print('[warn] scipy is unavailable; skipping ANOVA. Install with: pip install scipy', file=sys.stderr)
         return pd.DataFrame()
 
     groups = [sub for _, sub in df.groupby(CATEGORY_COLUMN, dropna=True)]
@@ -212,14 +249,14 @@ def one_way_anova(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="计算六维标准化互动指标（论文 RQ1）")
-    parser.add_argument("--video-file", type=Path, default=None, help="视频信息表 xlsx 路径")
-    parser.add_argument("--out-dir", type=Path, default=Path("output/interaction_metrics"), help="输出目录")
+    parser = argparse.ArgumentParser(description='Compute six normalized interaction metrics (paper RQ1)')
+    parser.add_argument("--video-file", type=Path, default=None, help='Video information workbook path')
+    parser.add_argument("--out-dir", type=Path, default=Path("output/interaction_metrics"), help='Output directory')
     args = parser.parse_args()
 
     video_file = args.video_file or resolve_default_video_file()
     if not video_file.is_file():
-        print(f"[error] 视频信息表不存在：{video_file}", file=sys.stderr)
+        print(f"[error] Video information table not found: {video_file}", file=sys.stderr)
         return 1
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -238,22 +275,22 @@ def main() -> int:
         *INTERACTION_METRICS,
     ]
     keep_cols = [c for c in keep_cols if c in with_rates.columns]
-    with_rates[keep_cols].to_csv(per_video_path, index=False, encoding="utf-8-sig")
+    export_frame(with_rates[keep_cols]).to_csv(per_video_path, index=False, encoding="utf-8-sig")
 
     summary = summarise_by_category(with_rates)
     summary_path = args.out_dir / "interaction_means_by_category.csv"
-    summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    export_frame(summary).to_csv(summary_path, index=False, encoding="utf-8-sig")
 
     anova = one_way_anova(with_rates)
     anova_path = args.out_dir / "interaction_anova.csv"
     if not anova.empty:
-        anova.to_csv(anova_path, index=False, encoding="utf-8-sig")
+        export_frame(anova).to_csv(anova_path, index=False, encoding="utf-8-sig")
 
-    print("\n=== 按学术分类的六维标准化互动指标均值（论文 Figure 1）===")
-    print(summary.to_string(index=False))
+    print('\n=== Mean normalized interaction metrics by analytic category (paper Figure 1) ===')
+    print(export_frame(summary).to_string(index=False))
     if not anova.empty:
-        print("\n=== 单因素 ANOVA（自变量 = 学术分类）===")
-        print(anova.to_string(index=False))
+        print('\n=== One-way ANOVA (factor: analytic category) ===')
+        print(export_frame(anova).to_string(index=False))
     print(f"\n[out] {per_video_path}")
     print(f"[out] {summary_path}")
     if not anova.empty:

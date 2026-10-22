@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
+
 # Category labels live in a shared module so every stage uses the same vocabulary.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from video_categories import (  # noqa: E402
@@ -14,6 +15,68 @@ from video_categories import (  # noqa: E402
     CATEGORY_LABELS_ZH_TO_EN,
     standardize_category_column,
 )
+
+
+# Presentation names for this script only; source values and research rules are unchanged.
+FIELD_NAMES = {}
+
+SHEET_NAMES = {
+    "评论分类_更新": "Comments_updated"
+}
+
+def english_name(name):
+    return FIELD_NAMES.get(name, name)
+
+
+def english_sheet(name):
+    return SHEET_NAMES.get(name, name)
+
+
+def resolve_sheet(names, requested):
+    """Prefer the requested historical name; also accept the English export name."""
+    return requested if requested in names else english_sheet(requested)
+
+
+def _rename_checked(frame, mapping):
+    columns = [mapping.get(c, c) for c in frame.columns]
+    if len(set(columns)) != len(columns):
+        raise ValueError("Ambiguous table schema: column aliases would produce duplicate names")
+    result = frame.copy()
+    result.columns = columns
+    result.index.names = [mapping.get(n, n) for n in result.index.names]
+    return result
+
+
+def export_frame(frame):
+    """Return an English-header copy without changing any values or row order."""
+    if isinstance(frame, pd.Series):
+        result = frame.copy()
+        result.name = english_name(result.name)
+        result.index.names = [english_name(n) for n in result.index.names]
+        return result
+    return _rename_checked(frame, FIELD_NAMES)
+
+
+def read_excel_compatible(path, *args, **kwargs):
+    """Read either export schema into the unchanged historical internal schema.
+
+    All pipeline calls use a single sheet. Keyword dtype keys are adapted to the
+    actual sheet headers before parsing so string identifiers remain strings.
+    """
+    with pd.ExcelFile(path) as book:
+        requested = kwargs.pop("sheet_name", args[0] if args else 0)
+        rest = args[1:] if args else ()
+        actual = resolve_sheet(book.sheet_names, requested)
+        if isinstance(kwargs.get("dtype"), dict):
+            headers = pd.read_excel(book, sheet_name=actual, nrows=0).columns
+            kwargs["dtype"] = {
+                k if k in headers else english_name(k): v
+                for k, v in kwargs["dtype"].items()
+            }
+        frame = pd.read_excel(book, *rest, sheet_name=actual, **kwargs)
+    return _rename_checked(frame, {v: k for k, v in FIELD_NAMES.items()})
+
+
 
 
 # Path priority: CLI argument > env var BFD_DATA_ROOT > default "data"
@@ -34,12 +97,12 @@ def pct(x: float) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="主题 × 视频学术分类的情感交叉统计（含点赞加权情感分，论文 RQ3/RQ4）"
+        description='Sentiment by topic and video analytic category, including like-weighted scores (paper RQ3/RQ4)'
     )
-    parser.add_argument("--topic-file", type=Path, default=None, help="主题分类结果表（sheet: 评论分类_更新）")
-    parser.add_argument("--sentiment-file", type=Path, default=None, help="情感分析结果表（sheet: Sheet1）")
-    parser.add_argument("--video-file", type=Path, default=None, help="视频信息表（含「学术分类」列）")
-    parser.add_argument("--out-csv", type=Path, default=None, help="交叉统计结果 CSV 输出路径")
+    parser.add_argument("--topic-file", type=Path, default=None, help='Topic classification table (sheet: Comments_updated; historical Chinese name also accepted)')
+    parser.add_argument("--sentiment-file", type=Path, default=None, help='Sentiment analysis table (sheet: Sheet1)')
+    parser.add_argument("--video-file", type=Path, default=None, help='Video information table with an analytic category column')
+    parser.add_argument("--out-csv", type=Path, default=None, help='Output CSV path for cross statistics')
     args = parser.parse_args()
 
     global CLS_F, SENT_F, VIDEO_F
@@ -50,24 +113,24 @@ def main() -> None:
     if args.video_file:
         VIDEO_F = args.video_file
 
-    for label, path in [("主题分类结果表", CLS_F), ("情感分析结果表", SENT_F), ("视频信息表", VIDEO_F)]:
+    for label, path in [('Topic classification table', CLS_F), ('Sentiment analysis table', SENT_F), ('Video information table', VIDEO_F)]:
         if not Path(path).is_file():
             raise FileNotFoundError(
-                f"{label}不存在：{path}\n"
+                f"{label} does not exist: {path}\n"
                 f"请设置环境变量 BFD_DATA_ROOT（当前 {_DATA_ROOT}）并把文件放到 "
                 f"<BFD_DATA_ROOT>/derived/ 下，或用 CLI 参数指定。详见 data/README.md"
             )
 
-    cls = pd.read_excel(CLS_F, sheet_name="评论分类_更新", dtype={"root_comment_id": str, "video_id": str})
+    cls = read_excel_compatible(CLS_F, sheet_name="评论分类_更新", dtype={"root_comment_id": str, "video_id": str})
     sent = pd.read_excel(SENT_F, sheet_name="Sheet1", dtype={"Comment_ID": str, "Video_ID": str})
-    # Accept `analytic_category` or the legacy `学术分类`, and normalise labels to English.
+    # Accept `analytic_category` or the legacy the legacy Chinese category header, and normalise labels to English.
     video = standardize_category_column(pd.read_excel(VIDEO_F, dtype={"Video_ID": str}))
 
     print("rows", len(cls), len(sent), len(video))
     print("cls macro names")
-    print(cls["macro_topic_name"].value_counts(dropna=False).head(10).to_string())
+    print(export_frame(cls["macro_topic_name"].value_counts(dropna=False).head(10)).to_string())
     print("sent labels")
-    print(sent["sentiment_label"].value_counts(dropna=False).to_string())
+    print(export_frame(sent["sentiment_label"].value_counts(dropna=False)).to_string())
 
     cls_ids = set(cls["root_comment_id"].dropna().astype(str))
     sent_ids = set(sent["Comment_ID"].dropna().astype(str))
@@ -115,7 +178,7 @@ def main() -> None:
     )
     print("\nTOP >=100")
     print(
-        top[
+        export_frame(top[
             [
                 "macro_topic_name",
                 CATEGORY_COLUMN,
@@ -128,7 +191,7 @@ def main() -> None:
                 "like_weighted_score",
             ]
         ]
-        .head(20)
+        .head(20))
         .to_string(
             index=False,
             formatters={
@@ -154,7 +217,7 @@ def main() -> None:
         ]
         print(primary, "|", academic)
         print(
-            row[
+            export_frame(row[
                 [
                     "count",
                     "positive",
@@ -165,7 +228,7 @@ def main() -> None:
                     "like_weighted_score",
                     "likes",
                 ]
-            ].to_string(
+            ]).to_string(
                 index=False,
                 formatters={
                     "negative_pct": pct,
@@ -177,7 +240,7 @@ def main() -> None:
 
     out = args.out_csv or Path(os.environ.get("BFD_OUTPUT_ROOT", "output")) / "cross_analysis" / "topic_category_sentiment_cross_stats.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
-    grouped.to_csv(out, index=False, encoding="utf-8-sig")
+    export_frame(grouped).to_csv(out, index=False, encoding="utf-8-sig")
     print("\nsaved", out)
 
 

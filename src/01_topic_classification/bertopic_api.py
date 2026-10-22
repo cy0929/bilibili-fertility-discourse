@@ -47,8 +47,52 @@ from typing import Any, Callable, Dict, Generator, List, Sequence, Set, Tuple
 import jieba                                   # Chinese word segmentation
 import numpy as np                             # numerical computation
 import pandas as pd                            # table reading / comment cleaning
+
 import yaml                                    # load the YAML config
 from sklearn.cluster import MiniBatchKMeans    # second-level clustering inside a first-level topic
+
+
+# Presentation names for this script only; source values and research rules are unchanged.
+FIELD_NAMES = {
+    "评论数": "comment_count",
+    "一级主题编号": "primary_topic_number",
+    "一级主题名称": "primary_topic_title",
+    "二级主题编号": "secondary_topic_number",
+    "二级主题名称": "secondary_topic_title",
+    "关键词": "keywords",
+    "代表评论": "representative_comments",
+    "占本一级主题比例": "within_primary_topic_share",
+    "占全部评论比例": "all_comments_share",
+    "平均二级主题相似度": "mean_secondary_similarity",
+    "平均大类相似度": "mean_macro_similarity",
+    "平均小类概率": "mean_micro_probability",
+    "需人工复核数": "manual_review_count"
+}
+
+def english_name(name):
+    return FIELD_NAMES.get(name, name)
+
+
+def _rename_checked(frame, mapping):
+    columns = [mapping.get(c, c) for c in frame.columns]
+    if len(set(columns)) != len(columns):
+        raise ValueError("Ambiguous table schema: column aliases would produce duplicate names")
+    result = frame.copy()
+    result.columns = columns
+    result.index.names = [mapping.get(n, n) for n in result.index.names]
+    return result
+
+
+def export_frame(frame):
+    """Return an English-header copy without changing any values or row order."""
+    if isinstance(frame, pd.Series):
+        result = frame.copy()
+        result.name = english_name(result.name)
+        result.index.names = [english_name(n) for n in result.index.names]
+        return result
+    return _rename_checked(frame, FIELD_NAMES)
+
+
 
 
 class BaseEmbedder:
@@ -63,8 +107,8 @@ try:
     from openai import APIError, RateLimitError, APITimeoutError, APIConnectionError
 except ImportError as e:
     raise ImportError(
-        "需要安装 openai SDK：pip install openai\n"
-        "原始错误: " + str(e)
+        "Install the openai SDK: pip install openai\n"
+        "Original error: " + str(e)
     )
 
 # tqdm progress bar; fall back to a no-op implementation if it is not installed
@@ -122,7 +166,7 @@ def setup_logging(log_file: str | None = None) -> None:
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         logger.addHandler(fh)
-        logger.info(f"日志同步写入文件: {log_file}")
+        logger.info(f"Log file: {log_file}")
 
 
 @contextmanager
@@ -134,9 +178,9 @@ def _timer(label: str) -> Generator[None, None, None]:
     elapsed = time.time() - t0
     mins, secs = divmod(elapsed, 60)
     if mins >= 1:
-        logger.info(f"✓ {label} 完成，耗时 {int(mins)}m {secs:.1f}s")
+        logger.info(f"✓ {label} completed in {int(mins)}m {secs:.1f}s")
     else:
-        logger.info(f"✓ {label} 完成，耗时 {elapsed:.1f}s")
+        logger.info(f"✓ {label} completed in {elapsed:.1f}s")
 
 
 # =============================================================================
@@ -159,7 +203,7 @@ def load_config(path: str) -> SimpleNamespace:
       2. when api.api_key is blank, try to read it from an environment variable
     """
     if not os.path.exists(path):
-        raise FileNotFoundError(f"未找到配置文件: {path}")
+        raise FileNotFoundError(f"Configuration file not found: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
@@ -194,7 +238,7 @@ def read_table(file_path: str) -> pd.DataFrame:
         return pd.read_csv(file_path)
     if ext == ".tsv":
         return pd.read_csv(file_path, sep="\t")
-    raise ValueError(f"不支持的文件格式: {ext}，仅支持 xlsx/xls/csv/tsv")
+    raise ValueError(f"Unsupported file format: {ext}; supported formats: xlsx/xls/csv/tsv")
 
 
 def load_stopwords(path: str) -> Set[str]:
@@ -231,9 +275,9 @@ def load_keywords(path: str) -> Set[str]:
 def normalize_text(text: str) -> str:
     """Clean raw comment text: strip @-mentions, links, emoji markers, and squeeze whitespace."""
     t = str(text)
-    t = re.sub(r"回复\s*@[^:：\n]+[:：]?", " ", t)         # Bilibili `回复 @xx:` prefix
+    t = re.sub(r"回复\s*@[^:：\n]+[:：]?", " ", t)         # Bilibili reply-to-user prefix
     t = re.sub(r"https?://\S+", " ", t)                    # http(s) links
-    t = re.sub(r"\[[^\]]{1,20}\]", " ", t)                 # `[doge]` `[笑哭]` emoji markers
+    t = re.sub(r"\[[^\]]{1,20}\]", " ", t)                 # Bracketed platform emoji markers
     t = re.sub(r"\s+", " ", t)                             # squeeze repeated whitespace
     return t.strip()
 
@@ -321,9 +365,9 @@ def collect_comments(
     records: List[Dict[str, object]] = []
 
     for file_idx, f in enumerate(files, start=1):
-        logger.info(f"[读取 {file_idx}/{len(files)}] {os.path.basename(f)}")
+        logger.info(f"[Reading {file_idx}/{len(files)}] {os.path.basename(f)}")
         df = read_table(f)
-        logger.debug(f"  → 原始行数: {len(df)}")
+        logger.debug(f"  -> Input rows: {len(df)}")
         # fill in missing required columns so row.get never raises KeyError
         needed_cols = [
             "Video_ID", "Title", "Comment_ID", "Comment_Content", "Comment_Likes",
@@ -374,7 +418,7 @@ def collect_comments(
     out = out.drop_duplicates(subset=["comment_type", "root_comment_id", "reply_id", "text"])
     out = out.reset_index(drop=True)
     out.insert(0, "doc_id", out.index)
-    logger.info(f"[收集] 原始记录 {before_dedup} 条，去重后 {len(out)} 条")
+    logger.info(f"[Collection] Input records: {before_dedup}; after deduplication: {len(out)} comments")
     return out
 
 
@@ -386,7 +430,7 @@ def save_dataframe_excel(df: pd.DataFrame, path: str) -> None:
     """Export a DataFrame to xlsx in one consistent way."""
     ensure_dir(os.path.dirname(path) or ".")
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
+        export_frame(df).to_excel(writer, index=False)
 
 
 def parse_nr_topics(value: Any) -> object:
@@ -485,7 +529,7 @@ def _load_cache(cache_path: str) -> Dict[str, np.ndarray]:
         data = np.load(cache_path, allow_pickle=False)
         return {k: data[k] for k in data.files}
     except Exception as e:
-        logger.warning(f"[cache] 读取失败({e})，按空缓存继续")
+        logger.warning(f"[cache] Read failed ({e}); continuing with an empty cache")
         return {}
 
 
@@ -522,13 +566,13 @@ def _call_embedding_api(
                 if 0 <= idx < len(batch):
                     ordered[idx] = np.asarray(item.embedding, dtype=np.float32)
             if any(v is None for v in ordered):
-                raise RuntimeError(f"API 返回数量不匹配：期望 {len(batch)}，实际 {sum(v is not None for v in ordered)}")
+                raise RuntimeError(f"API response count mismatch: expected {len(batch)}, received {sum(v is not None for v in ordered)}")
             return [v for v in ordered if v is not None]
         # transient errors that are worth retrying
         except (RateLimitError, APITimeoutError, APIConnectionError) as e:
             last_err = e
             wait = min(delay, 30.0)
-            logger.warning(f"[api] 第 {attempt}/{max_retries} 次失败 ({type(e).__name__})，等 {wait:.1f}s 后重试")
+            logger.warning(f"[api] Attempt {attempt}/{max_retries} failed ({type(e).__name__}); waiting {wait:.1f}s before retrying")
             time.sleep(wait)
             delay *= 2
         # APIError: retry on 5xx, raise immediately on 4xx
@@ -537,13 +581,13 @@ def _call_embedding_api(
             if status and 500 <= int(status) < 600:
                 last_err = e
                 wait = min(delay, 30.0)
-                logger.warning(f"[api] 第 {attempt}/{max_retries} 次 {status} 服务端错误，等 {wait:.1f}s 后重试")
+                logger.warning(f"[api] Attempt {attempt}/{max_retries} failed with {status} server error; waiting {wait:.1f}s before retrying")
                 time.sleep(wait)
                 delay *= 2
             else:
                 raise
     # retries exhausted
-    raise RuntimeError(f"API 请求重试 {max_retries} 次仍失败：{last_err}")
+    raise RuntimeError(f"API request failed after {max_retries} retries: {last_err}")
 
 
 def compute_api_embeddings(texts: List[str], cfg: SimpleNamespace, cache_path: str) -> np.ndarray:
@@ -563,12 +607,12 @@ def compute_api_embeddings(texts: List[str], cfg: SimpleNamespace, cache_path: s
     cache: Dict[str, np.ndarray] = {}
     if cfg.api.cache_enabled:
         cache = _load_cache(cache_path)
-        logger.info(f"[cache] 命中 {len(cache)} 条历史 embedding")
+        logger.info(f"[cache] Reusing {len(cache)} cached embeddings")
 
     # hash every text and find the cache misses
     hashes = [_text_hash(t, cfg.api.model) for t in safe_texts]
     missing_indices = [i for i, h in enumerate(hashes) if h not in cache]
-    logger.info(f"[api] 总计 {len(safe_texts)} 条，需请求 {len(missing_indices)} 条，已缓存 {len(safe_texts) - len(missing_indices)} 条")
+    logger.info(f"[api] Total: {len(safe_texts)}; to request: {len(missing_indices)}; cached: {len(safe_texts) - len(missing_indices)} comments")
 
     # 3. split into batches (misses only)
     if missing_indices:
@@ -605,7 +649,7 @@ def compute_api_embeddings(texts: List[str], cfg: SimpleNamespace, cache_path: s
         # 5. write the cache back
         if cfg.api.cache_enabled:
             _save_cache(cache_path, cache)
-            logger.info(f"[cache] 已落盘到 {cache_path}")
+            logger.info(f"[cache] Saved to {cache_path}")
 
     # 6. reassemble the full matrix in the original order
     return np.vstack([cache[h] for h in hashes])
@@ -781,7 +825,7 @@ def classify_macro_topics_semantic(
     unassigned_name = str(_cfg_get(macro_cfg, "unassigned_name", "边界不清/其他"))
 
     codebook_texts = [str(item["codebook_text"]) for item in macro_defs]
-    logger.info("  语义编码本分类: %d 个大类，计算类别 embedding", len(codebook_texts))
+    logger.info('  Semantic codebook classification: computing embeddings for %d primary topics', len(codebook_texts))
     codebook_embeddings = api_embedder.embed_documents(codebook_texts)
 
     doc_norm = _safe_l2_normalize(np.asarray(doc_embeddings, dtype=np.float32))
@@ -1071,7 +1115,7 @@ def build_hierarchical_subtopics(
         group_texts = out.loc[idx, "text"].astype(str).tolist()
         macro_name = str(out.loc[idx, "macro_topic_name"].iloc[0])
         k = _choose_subtopic_count(len(idx), sub_cfg)
-        logger.info("  一级主题[%s] %s: %d 条，拆分为 %d 个二级主题", macro_id + 1, macro_name, len(idx), k)
+        logger.info('  Primary topic [%s] %s: %d comments, partitioned into %d secondary topics', macro_id + 1, macro_name, len(idx), k)
 
         if k <= 1:
             labels = np.zeros(len(idx), dtype=int)
@@ -1205,7 +1249,7 @@ def build_topic_model(
     seed_topic_list = getattr(cfg.topic_modeling, "seed_topic_list", None) or None
     if seed_topic_list:
         logger.info(
-            "启用 seed_topic_list: %d 个种子主题，每个词数=%s",
+            'seed_topic_list enabled: %d seed topics, words per topic=%s',
             len(seed_topic_list), [len(s) for s in seed_topic_list],
         )
 
@@ -1309,9 +1353,9 @@ def fit_topics_with_fallback(
 # =============================================================================
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="使用 BERTopic + 硅基流动 API 对 B 站评论做主题分类")
+    parser = argparse.ArgumentParser(description='Classify Bilibili comment topics using BERTopic and an embedding API')
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH,
-                        help=f"YAML 配置文件路径（默认 {DEFAULT_CONFIG_PATH}）")
+                        help="YAML configuration path (default: environment setting, repository config, or example template)")
     return parser
 
 
@@ -1327,12 +1371,12 @@ def main() -> None:
     log_file = os.path.join(cfg.io.output_dir, f"bertopic_run_{_run_tag}.log")
     setup_logging(log_file)
     logger.info("=" * 60)
-    logger.info("BERTopic 评论主题分类 (API 版) 启动")
-    logger.info(f"配置文件: {args.config}")
+    logger.info('Starting BERTopic comment classification (embedding API)')
+    logger.info(f"Configuration file: {args.config}")
     logger.info("=" * 60)
 
     # ---- 1. locate the input files ----
-    with _timer("步骤 1/9  查找输入文件"):
+    with _timer('Step 1/9  Find input files'):
         files: List[str] = []
         if cfg.io.input_file and os.path.exists(cfg.io.input_file):
             files = [cfg.io.input_file]
@@ -1340,53 +1384,53 @@ def main() -> None:
             files = sorted(glob.glob(cfg.io.input_glob))
         if not files:
             raise FileNotFoundError(
-                f"未找到输入文件。input_file={cfg.io.input_file}, input_glob={cfg.io.input_glob}"
+                f"No input files found. input_file={cfg.io.input_file}, input_glob={cfg.io.input_glob}"
             )
-        logger.info(f"  找到 {len(files)} 个文件: {[os.path.basename(f) for f in files]}")
+        logger.info(f"  Found {len(files)} files: {[os.path.basename(f) for f in files]}")
 
     # ---- 2. dictionaries / vocabularies ----
-    with _timer("步骤 2/9  加载词典 / 词表"):
+    with _timer('Step 2/9  Load dictionaries and lexicons'):
         if cfg.io.user_dict and os.path.exists(cfg.io.user_dict):
             jieba.load_userdict(cfg.io.user_dict)
-            logger.info(f"  用户词典: {cfg.io.user_dict}")
+            logger.info(f"  User dictionary: {cfg.io.user_dict}")
         stopwords = load_stopwords(cfg.io.stopwords)
-        logger.info(f"  停用词数: {len(stopwords)}")
+        logger.info(f"  Stopword count: {len(stopwords)}")
         irrelevant_keywords = load_keywords(cfg.io.irrelevant_keywords)
         irrelevant_keywords.update(cfg.forced_irrelevant_keywords)
-        logger.info(f"  不相关关键词数: {len(irrelevant_keywords)}")
+        logger.info(f"  Irrelevant keyword count: {len(irrelevant_keywords)}")
         tokenizer = build_tokenizer(stopwords)
         vectorizer_tokenizer = build_vectorizer_tokenizer(stopwords)
         fallback_vectorizer_tokenizer = build_vectorizer_tokenizer_fallback(stopwords)
 
     # ---- 3. collect + filter comments ----
-    with _timer("步骤 3/9  收集评论"):
+    with _timer('Step 3/9  Collect comments'):
         comments_df = collect_comments(
             files=files,
             include_sub_replies=cfg.preprocessing.include_sub_replies,
             min_likes=cfg.preprocessing.min_likes,
         )
         if comments_df.empty:
-            raise RuntimeError("没有可用评论，请检查输入文件、字段或过滤参数。")
-        logger.info(f"  收集完成: {len(comments_df)} 条（min_likes≥{cfg.preprocessing.min_likes}）")
+            raise RuntimeError('No usable comments. Check input files, fields and filtering parameters.')
+        logger.info(f"  Collected: {len(comments_df)} comments (min_likes>={cfg.preprocessing.min_likes})")
 
-    with _timer("步骤 4/9  过滤评论"):
+    with _timer('Step 4/9  Filter comments'):
         n0 = len(comments_df)
 
         if (cfg.preprocessing.sample_size and 0 < cfg.preprocessing.sample_size < len(comments_df)):
             comments_df = comments_df.sample(n=cfg.preprocessing.sample_size, random_state=42).reset_index(drop=True)
             comments_df["doc_id"] = comments_df.index
-            logger.info(f"  随机采样: {n0} → {len(comments_df)} 条")
+            logger.info(f"  Random sampling: {n0} → {len(comments_df)} comments")
             n0 = len(comments_df)
 
         comments_df["text"] = comments_df["text"].fillna("").astype(str)
         comments_df = comments_df[comments_df["text"].str.len() >= cfg.preprocessing.min_char_len].copy()
         n1 = len(comments_df)
-        logger.info(f"  最短字符过滤 (≥{cfg.preprocessing.min_char_len}字): {n0} → {n1} 条，丢弃 {n0 - n1}")
+        logger.info(f"  Minimum character filter (>={cfg.preprocessing.min_char_len} characters): {n0} → {n1} comments; removed {n0 - n1}")
 
         comments_df["_tokens"] = comments_df["text"].apply(tokenizer)
         comments_df = comments_df[comments_df["_tokens"].apply(len) >= cfg.preprocessing.min_token_count].copy()
         n2 = len(comments_df)
-        logger.info(f"  最少 token 过滤 (≥{cfg.preprocessing.min_token_count}个): {n1} → {n2} 条，丢弃 {n1 - n2}")
+        logger.info(f"  Minimum token filter (>={cfg.preprocessing.min_token_count} tokens): {n1} → {n2} comments; removed {n1 - n2}")
 
         before_chatter = len(comments_df)
         comments_df = comments_df[~comments_df["_tokens"].apply(
@@ -1396,7 +1440,7 @@ def main() -> None:
             )
         )].copy()
         n3 = len(comments_df)
-        logger.info(f"  寒暄评论过滤: {before_chatter} → {n3} 条，丢弃 {before_chatter - n3}")
+        logger.info(f"  Social chatter filter: {before_chatter} → {n3} comments; removed {before_chatter - n3}")
 
         comments_df["has_research_signal"] = comments_df["text"].apply(
             lambda t: contains_research_signal(t, cfg.research_signal_tokens)
@@ -1409,13 +1453,13 @@ def main() -> None:
                 )
             ].copy()
             n4 = len(comments_df)
-            logger.info(f"  研究信号过滤: {before_signal} → {n4} 条，丢弃 {before_signal - n4}")
+            logger.info(f"  Research signal filter: {before_signal} → {n4} comments; removed {before_signal - n4}")
 
         comments_df = comments_df.reset_index(drop=True)
         comments_df["doc_id"] = comments_df.index
         if comments_df.empty:
-            raise RuntimeError("过滤后没有可用评论。")
-        logger.info(f"  过滤完成，最终保留 {len(comments_df)} 条评论")
+            raise RuntimeError('No usable comments remain after filtering.')
+        logger.info(f"  Filtering complete; retained {len(comments_df)} comments")
 
     # ---- 4. API embeddings ----
     docs = comments_df["text"].astype(str).tolist()
@@ -1428,10 +1472,10 @@ def main() -> None:
         request_timeout=int(cfg.api.request_timeout),
         max_retries=int(cfg.api.max_retries),
     )
-    logger.info(f"[api] 模型: {cfg.api.model}  base_url: {cfg.api.base_url}")
-    with _timer("步骤 5/9  API Embedding"):
+    logger.info(f"[api] Model: {cfg.api.model}  base_url: {cfg.api.base_url}")
+    with _timer('Step 5/9  API embeddings'):
         embeddings = compute_api_embeddings(docs, cfg, cache_path)
-        logger.info(f"  embedding 矩阵: {embeddings.shape}")
+        logger.info(f"  Embedding matrix: {embeddings.shape}")
 
     run_bertopic = bool(_cfg_get(cfg.topic_modeling, "run_bertopic", True))
 
@@ -1443,18 +1487,18 @@ def main() -> None:
     topic_info = pd.DataFrame(columns=["Topic", "Count", "Name", "Representation"])
     if not run_bertopic:
         selected_k_text = "skipped"
-        logger.info("步骤 6/9  跳过 BERTopic 自动选 K（topic_modeling.run_bertopic=false）")
+        logger.info('Step 6/9  Skip BERTopic K selection (topic_modeling.run_bertopic=false)')
     elif cfg.auto_select_k.enabled:
         if cfg.auto_select_k.k_min < 2 or cfg.auto_select_k.k_max < cfg.auto_select_k.k_min:
-            raise ValueError("k 范围非法，请确保 k_min>=2 且 k_max>=k_min")
+            raise ValueError('Invalid K range: require k_min>=2 and k_max>=k_min')
         candidate_ks = list(range(cfg.auto_select_k.k_min, cfg.auto_select_k.k_max + 1, max(1, cfg.auto_select_k.k_step)))
-        logger.info(f"步骤 6/9  自动选 K，候选: {candidate_ks}")
+        logger.info(f"Step 6/9  Automatic K selection; candidates: {candidate_ks}")
         rows: List[Dict[str, float]] = []
         best_score = -1.0
         best_k = candidate_ks[0]
         for k_idx, k in enumerate(candidate_ks, start=1):
-            logger.info(f"  [{k_idx}/{len(candidate_ks)}] 试验 k={k} ...")
-            with _timer(f"  k={k} 拟合"):
+            logger.info(f"  [{k_idx}/{len(candidate_ks)}] Testing k={k} ...")
+            with _timer(f"  k={k} fit"):
                 cm, ct, _ = fit_topics_with_fallback(
                     cfg=cfg, tokenizer=tokenizer, docs=docs, embeddings=embeddings,
                     nr_topics=k, effective_min_df=effective_min_df,
@@ -1467,7 +1511,7 @@ def main() -> None:
                 cfg.auto_select_k.target_topic_count, cfg.auto_select_k.topic_count_penalty,
             )
             logger.info(
-                f"  k={k}  主题数={int(metrics['topic_count'])}  噪声率={metrics['noise_ratio']:.2%}"
+                f"  k={k}  topic_count={int(metrics['topic_count'])}  noise_ratio={metrics['noise_ratio']:.2%}"
                 f"  diversity={metrics['diversity']:.3f}  score={metrics['score']:.4f}"
             )
             row: Dict[str, float] = {"k": float(k)}
@@ -1479,13 +1523,13 @@ def main() -> None:
         k_report_path = os.path.join(cfg.io.output_dir, f"主题数自动评估报告_{_run_tag}.xlsx")
         save_dataframe_excel(pd.DataFrame(rows), k_report_path)
         selected_k_text = str(best_k)
-        logger.info(f"  → 选定最优 k={best_k}（score={best_score:.4f}）")
+        logger.info(f"  -> Selected optimal k={best_k} (score={best_score:.4f})")
     else:
-        logger.info(f"步骤 6/9  跳过（auto_select_k 未启用），使用 nr_topics={selected_k_text}")
+        logger.info(f"Step 6/9  Skip K selection (auto_select_k disabled); nr_topics={selected_k_text}")
 
     # ---- 6. official fit ----
     if run_bertopic:
-        with _timer(f"步骤 7/9  BERTopic 正式拟合 (nr_topics={selected_k_text})"):
+        with _timer(f"Step 7/9  Fit BERTopic (nr_topics={selected_k_text})"):
             topic_model, topics, probs = fit_topics_with_fallback(
                 cfg=cfg, tokenizer=tokenizer, docs=docs, embeddings=embeddings,
                 nr_topics=int(selected_k_text) if selected_k_text.isdigit() else selected_k_text,
@@ -1495,18 +1539,18 @@ def main() -> None:
                 api_embedder=api_embedder,
             )
     else:
-        logger.info("步骤 7/9  跳过 BERTopic 正式拟合，直接进入 7 类语义编码本分类")
+        logger.info('Step 7/9  Skip BERTopic fitting; proceed to seven-topic semantic codebook classification')
         topics = np.full(len(comments_df), -1, dtype=int)
         probs = None
 
     # ---- 7. labeling / post-processing ----
     topic_count_valid = len([t for t in set(topics) if t != -1])
     if run_bertopic:
-        logger.info(f"  拟合完成: 识别出 {topic_count_valid} 个主题，噪声(-1)占比 {(np.array(topics)==-1).mean():.2%}")
+        logger.info(f"  Fit complete; identified {topic_count_valid} topics; noise (-1) share: {(np.array(topics)==-1).mean():.2%}")
     else:
-        logger.info("  BERTopic 已跳过：micro_topic/topic_probability 仅保留占位字段，最终分类由 macro_topic 决定")
+        logger.info('  BERTopic skipped: micro_topic/topic_probability are placeholders; macro_topic determines the final classification')
 
-    logger.info("▶ 步骤 8/9  后处理 / 噪声标记")
+    logger.info('> Step 8/9  Postprocess and flag noise')
     _t_post = time.time()
     comments_df["micro_topic"] = topics
     comments_df["topic"] = comments_df["micro_topic"]
@@ -1579,7 +1623,7 @@ def main() -> None:
         comments_df["topic"] = comments_df["macro_topic"]
         comments_df["topic_name"] = comments_df["macro_topic_name"]
         macro_counts = comments_df["macro_topic_name"].value_counts(dropna=False).to_dict()
-        logger.info(f"  最终研究大类归并: {macro_counts}")
+        logger.info(f"  Final primary topic counts: {macro_counts}")
     else:
         comments_df.loc[comments_df["is_noise"], "topic"] = -1
 
@@ -1593,10 +1637,10 @@ def main() -> None:
             sub_cfg=sub_cfg,
         )
 
-    logger.info(f"✓ 步骤 8/9  后处理 / 噪声标记 完成，耗时 {time.time() - _t_post:.1f}s")
+    logger.info(f"Step 8/9  Postprocessing and noise flagging completed in {time.time() - _t_post:.1f}s")
 
     # ---- 8. outputs ----
-    logger.info("▶ 步骤 9/9  写出结果文件")
+    logger.info('> Step 9/9  Write results')
     _t_output = time.time()
     comments_path = os.path.join(cfg.io.output_dir, f"评论主题分类结果_{_run_tag}.xlsx")
     comments_out = comments_df.drop(columns=["_tokens"], errors="ignore")
@@ -1623,18 +1667,18 @@ def main() -> None:
             topic_info["Name"] = topic_info["Name"].astype(str).apply(lambda n: clean_topic_keyword(n, stopwords))
     else:
         topic_info = pd.DataFrame(columns=["Topic", "Count", "Name", "Representation"])
-        logger.info("  跳过 BERTopic，主题概览输出为空表；请查看主题大类概览和一级二级主题表")
+        logger.info('  BERTopic skipped; topic overview is empty. See the primary topic overview and topic hierarchy tables.')
     topic_info_path = os.path.join(cfg.io.output_dir, f"主题概览_{_run_tag}.xlsx")
     save_dataframe_excel(topic_info, topic_info_path)
 
     topic_rows: List[Dict[str, object]] = []
     valid_topics = [t for t in topic_info["Topic"].tolist() if int(t) != -1]
-    logger.info(f"  有效主题数（非噪声）: {len(valid_topics)}")
+    logger.info(f"  Valid topics (excluding noise): {len(valid_topics)}")
     if run_bertopic and topic_model is not None:
         for topic_id in valid_topics:
             words = topic_model.get_topic(int(topic_id)) or []
             if not words:
-                logger.warning(f"  主题 {topic_id}: get_topic() 返回空，跳过")
+                logger.warning(f"  Topic {topic_id}: get_topic() returned no terms; skipping")
                 continue
             for rank, (word, score) in enumerate(words, start=1):
                 cw = clean_topic_keyword(str(word), stopwords)
@@ -1642,43 +1686,43 @@ def main() -> None:
                     continue
                 topic_rows.append({"topic": int(topic_id), "rank": rank, "word": cw, "score": float(score)})
     if run_bertopic and not topic_rows:
-        logger.warning("  主题关键词明细为空：若有效主题数>0，请检查 stopwords 是否过滤了所有关键词")
+        logger.warning('  Topic keyword details are empty. If valid topics exist, check whether stopwords removed all keywords.')
     topic_words_path = os.path.join(cfg.io.output_dir, f"主题关键词明细_{_run_tag}.xlsx")
     save_dataframe_excel(pd.DataFrame(topic_rows, columns=["topic", "rank", "word", "score"]), topic_words_path)
 
     if cfg.output.save_model and run_bertopic and topic_model is not None:
-        logger.info("  保存模型中 ...")
+        logger.info('  Saving model ...')
         model_save_path = os.path.join(cfg.io.output_dir, f"bertopic_model_{_run_tag}")
         topic_model.save(model_save_path, serialization="safetensors", save_ctfidf=True)
-        logger.info(f"  模型已保存至 {model_save_path}")
+        logger.info(f"  Model saved to {model_save_path}")
     elif cfg.output.save_model and not run_bertopic:
-        logger.info("  跳过模型保存：topic_modeling.run_bertopic=false")
+        logger.info('  Model saving skipped: topic_modeling.run_bertopic=false')
 
-    logger.info(f"✓ 步骤 9/9  写出结果文件 完成，耗时 {time.time() - _t_output:.1f}s")
+    logger.info(f"Step 9/9  Result export completed in {time.time() - _t_output:.1f}s")
 
     # ---- 9. summary ----
     noise_count = int((comments_df["is_noise"]).sum())
     valid_count = len(comments_df) - noise_count
     logger.info("")
     logger.info("=" * 60)
-    logger.info("BERTopic 全流程完成")
+    logger.info('BERTopic pipeline complete')
     logger.info("=" * 60)
-    logger.info(f"  配置文件:       {args.config}")
-    logger.info(f"  文档总数:       {len(comments_df)}")
-    logger.info(f"  有效文档:       {valid_count}  噪声: {noise_count} ({noise_count/len(comments_df):.1%})")
-    logger.info(f"  嵌入模型:       {cfg.api.model}  维度: {embeddings.shape[1]}")
-    logger.info(f"  最终 nr_topics: {selected_k_text}  实际主题数(含噪声): {topic_info.shape[0]}")
-    logger.info(f"  评论级结果:     {comments_path}")
-    logger.info(f"  主分析结果:     {analysis_comments_path}")
-    logger.info(f"  主题概览:       {topic_info_path}")
+    logger.info(f"  Configuration file: {args.config}")
+    logger.info(f"  Total documents: {len(comments_df)}")
+    logger.info(f"  Valid documents: {valid_count}  Noise: {noise_count} ({noise_count/len(comments_df):.1%})")
+    logger.info(f"  Embedding model: {cfg.api.model}  Dimensions: {embeddings.shape[1]}")
+    logger.info(f"  Final nr_topics: {selected_k_text}  Actual topics (including noise): {topic_info.shape[0]}")
+    logger.info(f"  Comment results: {comments_path}")
+    logger.info(f"  Main analysis results: {analysis_comments_path}")
+    logger.info(f"  Topic overview: {topic_info_path}")
     if macro_summary_path:
-        logger.info(f"  主题大类概览:   {macro_summary_path}")
+        logger.info(f"  Primary topic overview: {macro_summary_path}")
     if subtopic_summary_path:
-        logger.info(f"  一级二级主题表: {subtopic_summary_path}")
-    logger.info(f"  关键词明细:     {topic_words_path}")
+        logger.info(f"  Topic hierarchy: {subtopic_summary_path}")
+    logger.info(f"  Keyword details: {topic_words_path}")
     if k_report_path:
-        logger.info(f"  主题数评估报告: {k_report_path}")
-    logger.info(f"  日志文件:       {log_file}")
+        logger.info(f"  Topic count evaluation: {k_report_path}")
+    logger.info(f"  Log file: {log_file}")
 
 
 if __name__ == "__main__":

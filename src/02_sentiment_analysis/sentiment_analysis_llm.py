@@ -37,6 +37,117 @@ from typing import Any
 import openpyxl
 
 
+# Presentation mappings are local to this original script. No source cell values
+# are translated, and the source workbook is never saved by these helpers.
+EXPORT_HEADER_NAMES = {
+    "说明": "description",
+    "项目": "item",
+    "评论内容": "comment_content",
+    "评论文本": "comment_text",
+    "评论正文": "comment_body",
+    "用户评论": "user_comment",
+    "评论": "comment",
+    "标题": "video_title",
+    "视频ID": "video_identifier",
+    "主题名称": "video_theme_name",
+    "学术分类": "analytic_category",
+    "四分区": "video_partition_name",
+    "已失效视频": "invalid_video_flag",
+    "评论ID": "comment_id",
+    "根评论ID": "root_comment_id",
+    "点赞数": "like_count",
+    "情绪标签": "sentiment_label",
+    "情绪分数": "sentiment_score"
+}
+EXPORT_SHEET_NAMES = {
+    "说明": "Notes",
+    "情绪结果": "Sentiment_results",
+    "情绪分析": "Sentiment_analysis",
+    "视频信息": "Video_information",
+    "评论明细": "Comment_details"
+}
+
+
+def _contains_chinese(value):
+    return isinstance(value, str) and any("\u3400" <= c <= "\u9fff" for c in value)
+
+
+def _export_plan(workbook):
+    """Choose English display names without changing column or sheet order.
+
+    Unknown source labels use positional English identifiers, avoiding an
+    invented translation. Original labels are recovered from the source workbook
+    before any resumed model input is constructed.
+    """
+    reserved_sheets = {ws.title.lower() for ws in workbook if not _contains_chinese(ws.title)}
+    plan = []
+    for index, ws in enumerate(workbook, 1):
+        title = ws.title
+        if _contains_chinese(title):
+            base = EXPORT_SHEET_NAMES.get(title, f"Sheet{index}")
+            title = base
+            suffix = 1
+            while title.lower() in reserved_sheets:
+                title = f"{base[:25]}_{suffix}"
+                suffix += 1
+            reserved_sheets.add(title.lower())
+        original = [cell.value for cell in ws[1]]
+        reserved_headers = {v for v in original if isinstance(v, str) and not _contains_chinese(v)}
+        translated = []
+        for column, value in enumerate(original, 1):
+            name = value
+            if _contains_chinese(value):
+                name = EXPORT_HEADER_NAMES.get(value, f"source_field_{column}")
+                while name in reserved_headers:
+                    name += f"_source_{column}"
+                reserved_headers.add(name)
+            translated.append(name)
+        plan.append((title, translated))
+    return plan
+
+
+def save_english_workbook(workbook, path):
+    """Save English display names, then restore the in-memory source schema.
+
+    Only first-row header cells and sheet titles are changed during saving.
+    All result values, row/column positions and the model-input schema are kept.
+    """
+    originals = [(ws.title, [cell.value for cell in ws[1]]) for ws in workbook]
+    plan = _export_plan(workbook)
+    try:
+        for ws, (title, headers) in zip(workbook, plan):
+            ws.title = title
+            for cell, value in zip(ws[1], headers):
+                cell.value = value
+        workbook.save(path)
+    finally:
+        for ws, (title, headers) in zip(workbook, originals):
+            ws.title = title
+            for cell, value in zip(ws[1], headers):
+                cell.value = value
+
+
+def restore_source_schema(workbook, input_path):
+    """Restore exported header/sheet names from the unchanged original input.
+
+    This happens before selecting the configured worksheet or constructing model
+    context. Result columns and every data cell remain untouched.
+    """
+    source = openpyxl.load_workbook(input_path, read_only=True, data_only=False)
+    try:
+        plan = _export_plan(source)
+        for current, original, (title, headers) in zip(workbook, source, plan):
+            if current.title not in {original.title, title}:
+                continue
+            current.title = original.title
+            for cell, original_cell, exported in zip(current[1], original[1], headers):
+                if cell.value == exported:
+                    cell.value = original_cell.value
+    finally:
+        source.close()
+
+
+
 # Default: a locally deployed OpenAI-compatible server. Override with LLM_API_BASE_URL or [api].base_url.
 API_BASE_URL = "http://localhost:8000/v1"
 # Local servers usually ignore the bearer token; a placeholder keeps the header well-formed.
@@ -230,7 +341,7 @@ def setup_logging(level: str, log_file: str | None, timestamp: str) -> Path | No
         file_handler = logging.FileHandler(actual_log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
-        LOG.info("日志文件：%s", actual_log_path)
+        LOG.info('Log file: %s', actual_log_path)
 
     return actual_log_path
 
@@ -241,7 +352,7 @@ def config_path_for_display(config_path: str | None) -> Path:
 
 def safe_api_key_label(value: str | None) -> str:
     if not value:
-        return "未提供"
+        return 'not supplied'
     text = value.strip()
     if len(text) <= 10:
         return "***"
@@ -255,7 +366,7 @@ def rough_token_count(text: str) -> int:
 
 
 def log_duration(label: str, start_time: float) -> None:
-    LOG.info("%s完成，用时 %.2f 秒", label, time.perf_counter() - start_time)
+    LOG.info('%s completed in %.2f seconds', label, time.perf_counter() - start_time)
 
 
 class MinuteRateLimiter:
@@ -285,13 +396,13 @@ class MinuteRateLimiter:
 
     def acquire(self, estimated_tokens: int, label: str) -> None:
         if not self.enabled:
-            LOG.debug("限速器关闭：%s", label)
+            LOG.debug('Rate limiter disabled: %s', label)
             return
 
         token_cost = max(1, min(int(estimated_tokens), self.effective_tpm))
         if estimated_tokens > self.effective_tpm:
             LOG.warning(
-                "单次请求估算 tokens=%s 超过有效 TPM=%s，将按有效 TPM 计入限速：%s",
+                'Estimated request tokens=%s exceed effective TPM=%s; count effective TPM for rate limiting: %s',
                 estimated_tokens,
                 self.effective_tpm,
                 label,
@@ -308,7 +419,7 @@ class MinuteRateLimiter:
                     self._request_times.append(now)
                     self._token_events.append((now, token_cost))
                     LOG.debug(
-                        "限速通过：%s rpm=%s/%s tpm_est=%s/%s request_tokens=%s",
+                        'Rate limit passed: %s rpm=%s/%s tpm_est=%s/%s request_tokens=%s',
                         label,
                         rpm_used + 1,
                         self.effective_rpm,
@@ -326,7 +437,7 @@ class MinuteRateLimiter:
                 wait_seconds = max(0.2, min(waits) if waits else 1.0)
 
                 LOG.info(
-                    "触发限速等待 %.1f 秒：%s rpm=%s/%s tpm_est=%s/%s request_tokens=%s",
+                    'Rate limit reached; waiting %.1f seconds: %s rpm=%s/%s tpm_est=%s/%s request_tokens=%s',
                     wait_seconds,
                     label,
                     rpm_used,
@@ -343,14 +454,14 @@ def load_config(config_path: str | None) -> dict[str, Any]:
     path = Path(config_path).expanduser().resolve() if config_path else DEFAULT_CONFIG_PATH
     if not path.exists():
         if config_path:
-            raise ValueError(f"找不到配置文件：{path}")
+            raise ValueError(f"Configuration file not found: {path}")
         return {}
 
     with path.open("rb") as file:
         config = tomllib.load(file)
 
     if not isinstance(config, dict):
-        raise ValueError(f"配置文件格式不正确：{path}")
+        raise ValueError(f"Invalid configuration format: {path}")
     return config
 
 
@@ -414,7 +525,7 @@ def find_column(headers: list[str], requested: str | None, candidates: list[str]
         for idx, header in enumerate(headers, 1):
             if header == requested:
                 return idx
-        raise ValueError(f"找不到指定列：{requested}")
+        raise ValueError(f"Specified column not found: {requested}")
 
     normalized_candidates = {normalize_name(name) for name in candidates}
     for idx, header in enumerate(headers, 1):
@@ -428,7 +539,7 @@ def find_comment_column(ws: openpyxl.worksheet.worksheet.Worksheet, requested: s
     if requested:
         found = find_column(headers, requested, COMMENT_COLUMN_CANDIDATES)
         if found is None:
-            raise ValueError(f"找不到指定评论列：{requested}")
+            raise ValueError(f"Specified comment column not found: {requested}")
         return found
 
     normalized_candidates = {normalize_name(name) for name in COMMENT_COLUMN_CANDIDATES}
@@ -450,9 +561,9 @@ def find_comment_column(ws: openpyxl.worksheet.worksheet.Worksheet, requested: s
 
     header_text = "、".join(header for header in headers if header)
     raise ValueError(
-        "没有找到可用于情感分析的评论正文列。当前表格的 Comments 列看起来是评论数量，"
-        "不是评论文本。请先添加/导出一列评论正文，例如“评论内容”或“用户评论”。\n"
-        f"当前表头：{header_text}"
+        "No comment text column found for sentiment analysis. The Comments column appears "
+        "to contain counts. Add or export a comment text column, such as Comment_Content.\n"
+        f"Current headers: {header_text}"
     )
 
 
@@ -464,18 +575,18 @@ def ensure_result_columns(ws: openpyxl.worksheet.worksheet.Worksheet) -> dict[st
     for col_name in RESULT_COLUMNS:
         if col_name in headers:
             positions[col_name] = headers.index(col_name) + 1
-            LOG.debug("结果列已存在：%s -> 第 %s 列", col_name, positions[col_name])
+            LOG.debug('Result column exists: %s -> column %s', col_name, positions[col_name])
             continue
         new_col = ws.max_column + 1
         ws.cell(row=1, column=new_col, value=col_name)
         positions[col_name] = new_col
         headers.append(col_name)
-        added.append(f"{col_name}(第 {new_col} 列)")
+        added.append(f"{col_name}(column {new_col})")
 
     if added:
-        LOG.info("新增结果列：%s", "、".join(added))
+        LOG.info('Added result columns: %s', "、".join(added))
     else:
-        LOG.info("结果列均已存在，无需新增列")
+        LOG.info('All result columns already exist')
 
     return positions
 
@@ -530,10 +641,10 @@ def build_items(
     total_rows = max(0, ws.max_row - 1)
     start_time = time.perf_counter()
     LOG.info(
-        "开始扫描评论行：总数据行 %s，断点续跑=%s，limit=%s",
+        'Scanning comments: data rows=%s resume=%s limit=%s',
         total_rows,
         resume,
-        limit if limit is not None else "无",
+        limit if limit is not None else "none",
     )
 
     for row_id in range(2, ws.max_row + 1):
@@ -558,10 +669,10 @@ def build_items(
             )
         )
         if len(items) <= 3:
-            LOG.debug("样例评论 row=%s chars=%s", row_id, len(str(comment_value)))
+            LOG.debug('Example comment row=%s chars=%s', row_id, len(str(comment_value)))
         if scanned % 10000 == 0:
             LOG.info(
-                "扫描进度：已扫描 %s/%s 行，待处理 %s，已完成跳过 %s，空/非文本跳过 %s",
+                'Scan progress: %s/%s rows, pending=%s, completed skipped=%s, empty/non-text skipped=%s',
                 scanned,
                 total_rows,
                 len(items),
@@ -569,11 +680,11 @@ def build_items(
                 skipped_non_text,
             )
         if limit is not None and len(items) >= limit:
-            LOG.info("达到 limit=%s，停止继续扫描", limit)
+            LOG.info('Reached limit=%s; stopping scan', limit)
             break
 
     LOG.info(
-        "扫描结束：已扫描 %s 行，待处理 %s，已完成跳过 %s，空/非文本跳过 %s，用时 %.2f 秒",
+        'Scan complete: rows=%s pending=%s completed skipped=%s empty/non-text skipped=%s elapsed=%.2f seconds',
         scanned,
         len(items),
         skipped_done,
@@ -676,7 +787,7 @@ def estimate_batch_tokens(
 def post_chat_completion(api_key: str, api_base_url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
     url = f"{api_base_url.rstrip('/')}/chat/completions"
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    LOG.debug("发送 API 请求：url=%s body_bytes=%s timeout=%s", url, len(data), timeout)
+    LOG.debug('Sending API request: url=%s body_bytes=%s timeout=%s', url, len(data), timeout)
     request = urllib.request.Request(
         url,
         data=data,
@@ -735,7 +846,7 @@ def analyze_batch(
             )
             payload_text = json.dumps(payload, ensure_ascii=False)
             LOG.debug(
-                "API 请求准备完成：attempt=%s/%s response_format=%s comments=%s comment_chars=%s payload_chars=%s rough_tokens=%s",
+                'API request prepared: attempt=%s/%s response_format=%s comments=%s comment_chars=%s payload_chars=%s rough_tokens=%s',
                 attempt,
                 max_retries,
                 active_format,
@@ -748,10 +859,10 @@ def analyze_batch(
                 rate_limiter.acquire(estimated_tokens, f"{batch_label} attempt={attempt}")
             request_start = time.perf_counter()
             response = post_chat_completion(api_key, api_base_url, payload, timeout=timeout)
-            LOG.debug("API 响应用时 %.2f 秒", time.perf_counter() - request_start)
+            LOG.debug('API response time: %.2f seconds', time.perf_counter() - request_start)
             content = response["choices"][0]["message"]["content"]
             LOG.debug(
-                "API 响应内容：content_chars=%s rough_tokens=%s",
+                'API response: content_chars=%s rough_tokens=%s',
                 len(content),
                 rough_token_count(content),
             )
@@ -759,7 +870,7 @@ def analyze_batch(
             items = parsed.get("items", [])
             result = {int(item["row_id"]): item for item in items}
             LOG.info(
-                "批次解析成功：返回 %s/%s 条，attempt=%s，用时 %.2f 秒",
+                'Batch parsed: returned %s/%s items, attempt=%s, elapsed=%.2f seconds',
                 len(result),
                 len(batch),
                 attempt,
@@ -767,19 +878,19 @@ def analyze_batch(
             )
             if len(result) != len(batch):
                 missing = sorted({item.row_id for item in batch} - set(result))
-                LOG.warning("批次结果数量不一致：缺少行号示例 %s", missing[:10])
+                LOG.warning('Batch result count mismatch; missing row examples: %s', missing[:10])
             return result
         except ApiError as exc:
             last_error = exc
             if exc.status == 400 and active_format == "json_schema":
                 active_format = "json_object"
-                LOG.warning("json_schema 请求失败，后续重试切换为 json_object")
+                LOG.warning('json_schema request failed; subsequent retries use json_object')
             sleep_seconds = min(60, 2**attempt)
             LOG.warning(
-                "API 调用失败：attempt=%s/%s status=%s，%s 秒后重试。错误：%s",
+                'API call failed: attempt=%s/%s status=%s; retrying after %s seconds. Error: %s',
                 attempt,
                 max_retries,
-                exc.status if exc.status is not None else "无 HTTP 状态",
+                exc.status if exc.status is not None else 'no HTTP status',
                 sleep_seconds,
                 exc,
             )
@@ -789,7 +900,7 @@ def analyze_batch(
             parse_failed = True
             sleep_seconds = min(30, 2**attempt)
             LOG.warning(
-                "解析结果失败：attempt=%s/%s，%s 秒后重试。错误：%s",
+                'Result parsing failed: attempt=%s/%s; retrying after %s seconds. Error: %s',
                 attempt,
                 max_retries,
                 sleep_seconds,
@@ -798,8 +909,8 @@ def analyze_batch(
             time.sleep(sleep_seconds)
 
     if parse_failed and not isinstance(last_error, ApiError):
-        raise ResponseParseError(f"批次响应解析失败：{last_error}") from last_error
-    raise RuntimeError(f"批次处理失败：{last_error}")
+        raise ResponseParseError(f"Batch response parsing failed: {last_error}") from last_error
+    raise RuntimeError(f"Batch processing failed: {last_error}")
 
 
 def analyze_batch_resilient(
@@ -841,7 +952,7 @@ def analyze_batch_resilient(
     except ResponseParseError as exc:
         if len(batch) <= max(1, min_split_batch_size):
             LOG.error(
-                "批次解析失败且已达到最小拆分大小：%s comments=%s min_split_batch_size=%s",
+                'Batch parsing failed at minimum split size: %s comments=%s min_split_batch_size=%s',
                 batch_label,
                 len(batch),
                 min_split_batch_size,
@@ -852,7 +963,7 @@ def analyze_batch_resilient(
         left = batch[:midpoint]
         right = batch[midpoint:]
         LOG.warning(
-            "批次解析失败，自动拆分后重跑：%s comments=%s -> %s + %s。原因：%s",
+            'Batch parsing failed; splitting and retrying: %s comments=%s -> %s + %s. Reason: %s',
             batch_label,
             len(batch),
             len(left),
@@ -965,13 +1076,13 @@ def main() -> int:
     log_file = first_present(args.log_file, logging_config.get("file"))
     actual_log_path = setup_logging(log_level, str(log_file) if log_file else None, run_timestamp)
     program_start = time.perf_counter()
-    LOG.info("启动 LLM 评论情感分析脚本（本地 OpenAI 兼容端点）")
-    LOG.info("本次运行时间戳：%s", run_timestamp)
-    LOG.info("配置文件：%s（存在=%s）", config_path_for_display(args.config), bool(config))
+    LOG.info('Starting LLM comment sentiment analysis (local OpenAI-compatible endpoint)')
+    LOG.info('Run timestamp: %s', run_timestamp)
+    LOG.info('Configuration file: %s (exists=%s)', config_path_for_display(args.config), bool(config))
 
     input_value = first_present(args.input, run_config.get("input"))
     if not input_value:
-        LOG.error("请通过 --input 或配置文件 run.input 指定输入 Excel 文件。")
+        LOG.error('Specify the input Excel file using --input or run.input in the configuration.')
         return 2
 
     input_path = Path(str(input_value)).expanduser().resolve()
@@ -1013,22 +1124,22 @@ def main() -> int:
         first_present(args.rate_safety_factor, rate_limit_config.get("safety_factor"), default=0.9)
     )
 
-    LOG.info("输入文件：%s", input_path)
-    LOG.info("输出文件模板：%s", base_output_path)
-    LOG.info("自动续跑最新结果文件：%s", "开启" if resume_from_latest else "关闭")
+    LOG.info('Input file: %s', input_path)
+    LOG.info('Output filename template: %s', base_output_path)
+    LOG.info('Resume from latest result file: %s', 'enabled' if resume_from_latest else 'disabled')
     if resume_output_path:
-        LOG.info("检测到可续跑结果文件：%s", resume_output_path)
+        LOG.info('Resumable result file found: %s', resume_output_path)
     else:
-        LOG.info("未检测到可续跑结果文件，本次将创建新的时间戳结果文件")
-    LOG.info("实际读取工作簿：%s", workbook_path)
-    LOG.info("实际输出文件：%s", output_path)
+        LOG.info('No resumable result file found; creating a timestamped result file')
+    LOG.info('Workbook to read: %s', workbook_path)
+    LOG.info('Output file: %s', output_path)
     if actual_log_path:
-        LOG.info("实际日志文件：%s", actual_log_path)
-    LOG.info("工作表：%s", sheet_name if sheet_name else "首个工作表")
-    LOG.info("评论列配置：%s", comment_column if comment_column else "自动识别")
-    LOG.info("用户列：不读取、不发送（隐私保护）")
+        LOG.info('Log file for this run: %s', actual_log_path)
+    LOG.info('Worksheet: %s', sheet_name if sheet_name else 'first worksheet')
+    LOG.info('Comment column configuration: %s', comment_column if comment_column else 'automatic detection')
+    LOG.info('User columns: neither read nor sent (privacy protection)')
     LOG.info(
-        "模型配置：model=%s response_format=%s temperature=%s max_tokens=%s enable_thinking=%s",
+        'Model configuration: model=%s response_format=%s temperature=%s max_tokens=%s enable_thinking=%s',
         model,
         response_format,
         temperature,
@@ -1036,20 +1147,20 @@ def main() -> int:
         enable_thinking,
     )
     LOG.info(
-        "运行参数：batch_size=%s max_workers=%s min_split_batch_size=%s limit=%s timeout=%s max_retries=%s save_every=%s resume=%s dry_run=%s",
+        'Run settings: batch_size=%s max_workers=%s min_split_batch_size=%s limit=%s timeout=%s max_retries=%s save_every=%s resume=%s dry_run=%s',
         batch_size,
         max_workers,
         min_split_batch_size,
-        limit if limit is not None else "无",
+        limit if limit is not None else "none",
         timeout,
         max_retries,
         save_every,
         not args.no_resume,
         args.dry_run,
     )
-    LOG.info("API base_url：%s", api_base_url)
+    LOG.info("API base_url:%s", api_base_url)
     LOG.info(
-        "限速配置：enabled=%s max_rpm=%s max_tpm=%s safety_factor=%s effective_rpm=%s effective_tpm=%s",
+        'Rate limit settings: enabled=%s max_rpm=%s max_tpm=%s safety_factor=%s effective_rpm=%s effective_tpm=%s',
         rate_limit_enabled,
         max_rpm,
         max_tpm,
@@ -1065,21 +1176,22 @@ def main() -> int:
     )
 
     if not input_path.exists():
-        LOG.error("找不到输入文件：%s", input_path)
+        LOG.error('Input file not found: %s', input_path)
         return 2
     if not workbook_path.exists():
-        LOG.error("找不到实际读取工作簿：%s", workbook_path)
+        LOG.error('Workbook to read not found: %s', workbook_path)
         return 2
 
     load_start = time.perf_counter()
-    LOG.info("开始读取工作簿")
+    LOG.info('Reading workbook')
     wb = openpyxl.load_workbook(workbook_path)
+    restore_source_schema(wb, input_path)
     ws = wb[str(sheet_name)] if sheet_name else wb[wb.sheetnames[0]]
     headers = [normalize_header(cell.value) for cell in ws[1]]
-    LOG.info("工作簿读取完成：sheets=%s", wb.sheetnames)
-    LOG.info("当前工作表：%s，行数=%s，列数=%s", ws.title, ws.max_row, ws.max_column)
-    LOG.info("表头：%s", " | ".join(headers))
-    log_duration("读取工作簿", load_start)
+    LOG.info('Workbook loaded: sheets=%s', wb.sheetnames)
+    LOG.info('Current worksheet: %s, rows=%s, columns=%s', ws.title, ws.max_row, ws.max_column)
+    LOG.info('Headers: %s', " | ".join(headers))
+    log_duration('Read workbook', load_start)
 
     try:
         comment_col = find_comment_column(ws, str(comment_column) if comment_column else None)
@@ -1087,13 +1199,13 @@ def main() -> int:
     except ValueError as exc:
         LOG.error("%s", exc)
         return 2
-    LOG.info("评论列识别结果：%s -> 第 %s 列", ws.cell(row=1, column=comment_col).value, comment_col)
+    LOG.info('Detected comment column: %s -> column %s', ws.cell(row=1, column=comment_col).value, comment_col)
     result_cols = ensure_result_columns(ws)
-    LOG.info("结果列位置：%s", result_cols)
+    LOG.info('Result column positions: %s', result_cols)
     if not args.no_resume:
         marker_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         backfilled = backfill_completed_markers(ws, result_cols, marker_time)
-        LOG.info("已回填旧结果断点标记：%s 行", backfilled)
+        LOG.info('Restored resume markers for %s rows', backfilled)
 
     build_start = time.perf_counter()
     items = build_items(
@@ -1104,29 +1216,29 @@ def main() -> int:
         limit=int(limit) if limit is not None else None,
         resume=not args.no_resume,
     )
-    log_duration("构建待处理评论列表", build_start)
+    log_duration('Build pending comment list', build_start)
 
-    LOG.info("待处理评论数：%s", len(items))
+    LOG.info('Pending comments: %s', len(items))
 
     if args.dry_run:
         preview = [compact_item(item) for item in items[:3]]
-        LOG.info("dry-run 模式：不调用 API，不写入结果文件")
-        LOG.info("前三条待分析样例：\n%s", json.dumps(preview, ensure_ascii=False, indent=2))
-        log_duration("全流程 dry-run", program_start)
+        LOG.info('Dry-run mode: no API calls or result files')
+        LOG.info('First three pending examples:\n%s', json.dumps(preview, ensure_ascii=False, indent=2))
+        log_duration('Full pipeline dry-run', program_start)
         return 0
 
     api_key = first_present(os.getenv("LLM_API_KEY"), api_config.get("api_key"))
     if is_placeholder_api_key(str(api_key) if api_key is not None else None):
         # Local OpenAI-compatible servers normally accept any bearer token.
         api_key = LOCAL_PLACEHOLDER_API_KEY
-        LOG.info("未提供 API Key，使用本地端点占位符 %r（本地服务通常不校验）", api_key)
+        LOG.info('No API key supplied; using local endpoint placeholder %r (local servers usually do not validate it)', api_key)
     else:
-        LOG.info("API Key：%s（已脱敏）", safe_api_key_label(str(api_key)))
+        LOG.info('API key: %s (redacted)', safe_api_key_label(str(api_key)))
 
     batches = chunked(items, max(1, batch_size))
-    LOG.info("批次计划：共 %s 批，每批最多 %s 条", len(batches), batch_size)
+    LOG.info('Batch plan: %s batches, at most %s comments per batch', len(batches), batch_size)
     if not batches:
-        LOG.info("没有待处理批次，直接保存输出文件")
+        LOG.info('No pending batches; saving output file')
     else:
         batch_estimates = [
             estimate_batch_tokens(
@@ -1143,13 +1255,13 @@ def main() -> int:
         ]
         total_estimated_tokens = sum(batch_estimates)
         LOG.info(
-            "批次 token 估算：总计=%s，平均/批=%.0f，最大/批=%s",
+            'Estimated batch tokens: total=%s mean/batch=%.0f max/batch=%s',
             total_estimated_tokens,
             total_estimated_tokens / len(batch_estimates),
             max(batch_estimates),
         )
         LOG.info(
-            "并发计划：max_workers=%s，限速后理论请求上限约 %.1f 批/分钟（按平均 tokens 估算）",
+            'Concurrency plan: max_workers=%s; rate-limited theoretical maximum approximately %.1f batches/minute (estimated from mean tokens)',
             max_workers,
             min(
                 max_rpm * rate_safety_factor,
@@ -1177,7 +1289,7 @@ def main() -> int:
                 estimated_tokens = batch_estimates[batch_index - 1]
                 batch_label = f"batch={batch_index}/{len(batches)} rows={batch[0].row_id}-{batch[-1].row_id}"
                 LOG.info(
-                    "提交批次 %s/%s：行号 %s-%s，评论数=%s，estimated_tokens=%s",
+                    'Submitting batch %s/%s: rows %s-%s, comments=%s, estimated_tokens=%s',
                     batch_index,
                     len(batches),
                     batch[0].row_id,
@@ -1212,12 +1324,12 @@ def main() -> int:
                     results = future.result()
                 except Exception as exc:
                     failed = True
-                    LOG.exception("批次 %s/%s 失败，准备保存当前进度并停止：%s", batch_index, len(batches), exc)
+                    LOG.exception('Batch %s/%s failed; saving progress and stopping: %s', batch_index, len(batches), exc)
                     cancelled = 0
                     for pending_future in futures:
                         if pending_future is not future and pending_future.cancel():
                             cancelled += 1
-                    LOG.warning("已尝试取消未开始的批次任务：%s 个；已在运行的任务会等待结束", cancelled)
+                    LOG.warning('Attempted to cancel %s pending batch tasks; waiting for running tasks to finish', cancelled)
                     break
 
                 missing_count = 0
@@ -1236,7 +1348,7 @@ def main() -> int:
                 completed_comments += len(batch)
                 elapsed = time.perf_counter() - pool_start
                 LOG.info(
-                    "批次 %s/%s 写入完成：结果=%s，缺失补 uncertain=%s，estimated_tokens=%s，批次用时 %.2f 秒，总进度 %s/%s 批、%s/%s 条，整体速度 %.1f 条/分钟",
+                    'Batch %s/%s written: results=%s missing filled as uncertain=%s estimated_tokens=%s elapsed=%.2f seconds; progress %s/%s batches, %s/%s comments, overall %.1f comments/minute',
                     batch_index,
                     len(batches),
                     len(results),
@@ -1252,9 +1364,9 @@ def main() -> int:
 
                 if completed_batches % max(1, save_every) == 0:
                     save_start = time.perf_counter()
-                    wb.save(output_path)
+                    save_english_workbook(wb, output_path)
                     LOG.info(
-                        "已保存进度：%s（完成 %s/%s 批，用时 %.2f 秒）",
+                        'Progress saved: %s (%s/%s batches completed, elapsed=%.2f seconds)',
                         output_path,
                         completed_batches,
                         len(batches),
@@ -1263,14 +1375,14 @@ def main() -> int:
 
         if failed:
             save_start = time.perf_counter()
-            wb.save(output_path)
-            LOG.info("失败前进度已保存：%s（用时 %.2f 秒）", output_path, time.perf_counter() - save_start)
+            save_english_workbook(wb, output_path)
+            LOG.info('Progress before failure saved: %s (elapsed=%.2f seconds)', output_path, time.perf_counter() - save_start)
             return 1
 
     save_start = time.perf_counter()
-    wb.save(output_path)
-    LOG.info("最终结果已保存：%s（用时 %.2f 秒）", output_path, time.perf_counter() - save_start)
-    log_duration("全流程", program_start)
+    save_english_workbook(wb, output_path)
+    LOG.info('Final results saved: %s (elapsed=%.2f seconds)', output_path, time.perf_counter() - save_start)
+    log_duration('Full pipeline', program_start)
     return 0
 
 

@@ -160,16 +160,16 @@ python src/03_interaction_metrics/compute_interaction_metrics.py \
 # (0.28) or with an insufficient top-1/top-2 margin (0.025) are flagged as boundary cases.
 python src/01_topic_classification/bertopic_api.py --config config/bertopic_config.yaml
 
-# Stage 2 — review workbook: sheet 评论分类_更新 holds ONLY the high-confidence comments;
-# sheet 边界样本_待人工复核 lists every boundary comment with its two nearest candidate
+# Stage 2 — review workbook: sheet Comments_updated holds ONLY the high-confidence comments;
+# sheet Boundary_manual_review lists every boundary comment with its two nearest candidate
 # topics, a rule-based suggestion (e.g. platform chatter → suggest exclude), and empty
-# columns 人工复核_处理 / 人工复核_一级主题编号 / 人工复核_二级主题编号 for the reviewer.
+# columns manual_decision / manual_primary_topic_no / manual_secondary_topic_no for the reviewer.
 python src/01_topic_classification/build_boundary_review_workbook.py \
     --input-dir output/topic_classification
 
 # Stage 3 — after the reviewer(s) fill in the decisions, merge accepted comments into the
 # final table. Rows without a valid decision stay out of the analysis. If a second coder
-# fills 人工复核_一级主题编号_2 / 人工复核_处理_2, percent agreement and Cohen's kappa are reported.
+# fills manual_primary_topic_no_2 / manual_decision_2, percent agreement and Cohen's kappa are reported.
 python src/01_topic_classification/apply_manual_review.py \
     --review-file output/topic_classification/comments_boundary_review_<run_tag>_<timestamp>.xlsx
 ```
@@ -213,7 +213,7 @@ python src/04_cross_analysis/compute_cross_analysis.py
 ```
 
 > `--topic-file` must point to the workbook written by `apply_manual_review.py`
-> (sheet `评论分类_更新` = high-confidence comments + manually accepted boundary comments).
+> (sheet `Comments_updated` = high-confidence comments + manually accepted boundary comments).
 
 Environment variables can replace the individual flags:
 
@@ -238,3 +238,36 @@ The run was repeated against both the legacy Chinese-labelled export and the Eng
 one produced by `src/00_data_preparation/normalize_video_categories.py`. All 13 numeric output
 columns are identical (maximum absolute difference 0.0) across the two inputs, so switching the
 labels changes presentation only, never results.
+
+
+## English presentation and historical input compatibility
+
+Generated topic/review workbooks, statistical CSV headers and cross-analysis JSON
+field names use English. Readers accept both these English export names and the
+historical Chinese worksheet/header names through local presentation mappings
+inside the original scripts. Duplicate aliases are rejected rather than silently
+losing a field. Column order and cell values are preserved. The repository keeps
+its original 27 files; audit records and synthetic tests are kept outside it.
+
+In `Boundary_manual_review`, enter `include` or `exclude` in `manual_decision`,
+and a primary topic number (1–7) for included comments. Secondary topic numbers,
+reviewer names and notes remain optional. Historical Chinese decisions continue
+to be accepted. Blank or invalid decisions remain excluded. Optional second-coder
+columns are `manual_primary_topic_no_2` and `manual_decision_2`.
+
+Chinese topic names, semantic codebooks, keywords, regular expressions, sentiment
+labels, review status values and prompts are preserved as research material.
+The sentiment script translates headers and sheet names only when saving its
+output. Before resuming, it recovers source labels from the unchanged original
+input workbook, so model context and worksheet selection remain the same. Comment
+text, topic names and all result values remain unchanged. Unrecognized source
+headers/sheet names receive deterministic positional English identifiers rather
+than guessed translations. The category-normalization utility still accepts
+`--keep-column-name` for CLI compatibility, but its final export headers are
+always English. No input workbooks are edited as part of this update.
+
+The boundary review sheet historically omits `root_comment_id` from its selected
+columns. A manually accepted row can therefore lack that identifier in the final
+table. This existing limitation is documented without changing the sample or
+inventing identifiers. The deprecated legacy script remains deprecated; this
+presentation update does not reconstruct or revise historical boundary assignments.
